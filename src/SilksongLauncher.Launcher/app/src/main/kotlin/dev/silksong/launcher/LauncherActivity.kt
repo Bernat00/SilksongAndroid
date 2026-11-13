@@ -524,8 +524,19 @@ class LauncherActivity : Activity() {
                 spinner?.visibility = View.GONE
                 // Both, unconditionally: cheaper than remembering which one
                 // was changed, and correct if a future caller changes both.
-                btnPull.text = getString(R.string.action_pull_saves)
-                btnPush.text = getString(R.string.action_push_saves)
+                // The GOG depot renames Download→Sync on the pull side and
+                // collapses the push pair, so the store-aware refresh runs
+                // HERE too — without it a finished sync restored the Steam
+                // labels (the flip the reporter saw after every sync).
+                if (GogSync.gogDepotPresent(this@LauncherActivity)) {
+                    btnPull.text = "Sync saves"
+                    btnPush.text = ""
+                    btnPush.visibility = android.view.View.GONE
+                } else {
+                    btnPull.text = getString(R.string.action_pull_saves)
+                    btnPush.text = getString(R.string.action_push_saves)
+                    btnPush.visibility = android.view.View.VISIBLE
+                }
                 btnLaunch.isEnabled = true
                 if (creds != null) {
                     btnPull.isEnabled = true

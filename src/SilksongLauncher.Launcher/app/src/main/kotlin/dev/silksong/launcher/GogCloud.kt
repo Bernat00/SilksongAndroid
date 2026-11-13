@@ -260,7 +260,17 @@ object GogAuth {
      */
     fun gameToken(context: Context): Tokens? {
         val tokens = loadTokens(context) ?: return null
-        if (tokens.gameAccessToken.isNotEmpty()) return tokens
+        if (tokens.gameAccessToken.isNotEmpty()) {
+            // Game-scoped GOG tokens live roughly an hour; a mint older than
+            // 20 minutes is re-minted BEFORE the bucket call that would
+            // otherwise answer 401 after a break (#47's reporter's 2.5-hour
+            // gap produced exactly that dead token).
+            val age = try {
+                val mint = File(context.filesDir, "gog_mint_at").readText().trim().toLongOrNull() ?: 0L
+                (System.currentTimeMillis() - mint) / 1000L
+            } catch (_: Throwable) { Long.MAX_VALUE }
+            if (age < 1200L) return tokens
+        }
         if (tokens.refreshToken.isEmpty() || tokens.gameClientId.isEmpty()) return null
         val url = TOKEN_URL + "?client_id=" +
             java.net.URLEncoder.encode(tokens.gameClientId, "UTF-8") +
@@ -285,6 +295,10 @@ object GogAuth {
             gameClientSecret = tokens.gameClientSecret,
         )
         tokensFile(context).writeText(toJson(updated))
+        try {
+            File(context.filesDir, "gog_mint_at").writeText(
+                System.currentTimeMillis().toString())
+        } catch (_: Throwable) { }
         LauncherLog.log("GOG: game-scoped token minted for the save bucket")
         return updated
     }
@@ -391,6 +405,9 @@ object GogCloud {
      * guessed folder.
      */
     fun bucketDirName(clientId: String): String? {
+        // The silent catch here cost a diagnosis round: a remote-config
+        // failure surfaced as a sync that "did nothing". Every step of this
+        // function logs its reason now.
         return try {
             val text = boundedFor("remote-config", 30_000) {
                 conn("$REMOTE_CONFIG/components/galaxy_client/clients/${java.net.URLEncoder.encode(clientId, "UTF-8")}?component_version=2.0.45", "", "GET")
@@ -405,8 +422,12 @@ object GogCloud {
             if (locations.length() == 0) return null
             val first = locations.getJSONObject(0)
             val name = jstr(first, "name")
-            if (name.isEmpty()) null else name
-        } catch (_: Throwable) {
+            if (name.isEmpty()) {
+                LauncherLog.log("GOG remote-config: no location name for client " + clientId + " body=" + text.take(300))
+                null
+            } else name
+        } catch (t: Throwable) {
+            LauncherLog.log("GOG: remote-config fetch failed: ${t.javaClass.simpleName}: ${t.message}")
             null
         }
     }

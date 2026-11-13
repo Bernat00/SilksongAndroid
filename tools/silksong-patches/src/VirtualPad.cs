@@ -125,6 +125,14 @@ public class VirtualPad : MonoBehaviour
     readonly GUIContent[] labelContent = new GUIContent[8];
     int labelCooldown;
     int liveToggleCooldown;
+    float _diagTimer;                  // per-two-second diagnostic line (debug)
+    global::GlobalEnums.GameState gm_GameState()
+    {
+        var gm = GameManager._instance;
+        return gm != null ? gm.GameState : global::GlobalEnums.GameState.INACTIVE;
+    }
+
+    bool actionsSet;                   // the IncludeDevices hammer was placed
     float lastPlayingTime = -99f;
     bool includedDevices;
 
@@ -208,6 +216,19 @@ public class VirtualPad : MonoBehaviour
         for (int i = 0; i < device.Buttons.Length; i++) device.Buttons[i] = false;
         device.Stick = Vector2.zero;
 
+        // DIAGNOSTIC (debug builds): every two seconds, one line with the
+        // whole decision state, so a non-working pad names its reason.
+        _diagTimer -= Time.unscaledDeltaTime;
+        if (_diagTimer <= 0f)
+        {
+            _diagTimer = 2f;
+            var mask = 0;
+            for (int i = 0; i < device.Buttons.Length; i++) if (device.Buttons[i]) mask |= 1 << i;
+            Debug.Log($"[VPad] gs={(int)gm_GameState()} vis={visible} incl={includedDevices} " +
+                $"attached={deviceAttached} setActions={actionsSet} stick={device.Stick.x:F2},{device.Stick.y:F2} " +
+                $"btns=0x{mask:X2} fingers={stickFinger},{string.Join(",", buttonFinger)}");
+        }
+
         // GAMEPLAY ONLY, with a short hysteresis: the game's state can bob
         // in and out of PLAYING between scenes, and an overlay that
         // disappears for a frame and returns reads as a flicter.
@@ -237,6 +258,7 @@ public class VirtualPad : MonoBehaviour
 
             if (t.fingerId == stickFinger)
             {
+                if (t.phase == TouchPhase.Began) LogTouch("stick-held-begin", t);
                 if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
                 {
                     stickFinger = -1;
@@ -263,6 +285,7 @@ public class VirtualPad : MonoBehaviour
             var t = touches[i];
             if (t.phase != TouchPhase.Began) continue;
             var gui = new Vector2(t.position.x, Screen.height - t.position.y);
+            LogTouch("new-touch", t);
 
             if (stickFinger == -1 && InStickZone(gui))
             {
@@ -291,6 +314,15 @@ public class VirtualPad : MonoBehaviour
         {
             device.Buttons[b] = buttonFinger[b] != -1;
         }
+    }
+
+    void LogTouch(string where, UnityEngine.Touch t)
+    {
+        // One line per touch EVENT during the debug session: routes are
+        // decided here and this names every decision with coordinates.
+        var gui = new Vector2(t.position.x, Screen.height - t.position.y);
+        Debug.Log($"[VPadT] {where} id={t.fingerId} phase={t.phase} gui={gui.x:F0},{gui.y:F0} " +
+            $"zone={(InStickZone(gui) ? "stick" : "other")}");
     }
 
     void UpdateKnob(Vector2 guiPos)

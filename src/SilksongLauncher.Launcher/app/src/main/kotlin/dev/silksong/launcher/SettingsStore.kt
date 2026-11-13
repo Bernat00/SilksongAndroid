@@ -174,6 +174,7 @@ class SettingsStore(context: Context) {
             append(KEY_WIDE_ASPECT).append('=').append(wideAspect).append('\n')
             append(KEY_KEEP_SCREEN_ON).append('=').append(keepScreenOn).append('\n')
             append(KEY_PERF_LOG).append('=').append(perfLog).append('\n')
+            append(KEY_TOUCH_OVERLAY).append('=').append(touchOverlay).append('\n')
         }
         try {
             val out = File(dir, "game-settings.txt")
