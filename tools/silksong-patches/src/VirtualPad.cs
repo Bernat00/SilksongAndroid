@@ -595,7 +595,11 @@ public class VirtualPad : MonoBehaviour
                 STICK_RING_R * 1.1f * vminNow, STICK_RING_R * 1.1f * vminNow), tex);
         }
 
-        for (int b = 0; b < 6; b++)
+        // ALL EIGHT roles, Map and Inventory included: the loop used to stop
+        // at 6, so those two pills were committed, routable and clickable
+        // invisibly -- the pixel evidence (two screenshots) and the code
+        // agree; a pill that exists but not on screen is a trap.
+        for (int b = 0; b < 8; b++)
         {
             var centre = ButtonCentre(b);
             bool isPill = (PadButton)b >= PadButton.Dash;
