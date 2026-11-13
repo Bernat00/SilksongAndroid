@@ -387,6 +387,8 @@ object Il2cppConverter {
             // so the previous run's count is the denominator and the constant is
             // only ever used once.
             var lastHeartbeat = System.currentTimeMillis()
+            var lastStallAt = lastHeartbeat
+            var lastStallN = -1
             val ticker = launch(Dispatchers.IO) {
                 while (isActive) {
                     delay(PROGRESS_POLL_MS)
@@ -404,9 +406,29 @@ object Il2cppConverter {
                     val now = System.currentTimeMillis()
                     if (now - lastHeartbeat >= HEARTBEAT_MS) {
                         lastHeartbeat = now
+                        // One line carries all three readouts the user reads
+                        // a conversion log for: progress, elapsed seconds,
+                        // free memory. Elapsed was previously only in the RSS
+                        // trail -- which prints at 0.5 GB crossings and can
+                        // skip minutes -- so mid-run lines read oddly bare.
+                        val secs = (now - started) / 1000
                         LauncherLog.log(
-                            "il2cpp: $n of $expected files so far; ${MonoRuntime.memory(context)}",
+                            "il2cpp: $n of $expected files after ${secs}s; ${MonoRuntime.memory(context)}",
                         )
+                        // Stall watch: the GC-thrash crawl looks identical to
+                        // a wedge from the outside. If the file count refuses
+                        // to move, say so loudly instead of silent burning.
+                        if (n == lastStallN && n * 100L < expected * 90L) {
+                            val stuckFor = (now - lastStallAt) / 1000
+                            if (stuckFor > 360) {
+                                LauncherLog.log(
+                                    "il2cpp: no new files for ${stuckFor / 60} min -- the heap is too " +
+                                        "small for this phase or memory is tight; close other apps " +
+                                        "and restart the device before the next attempt",
+                                )
+                                lastStallAt = now
+                            }
+                        } else { lastStallN = n; lastStallAt = now }
                     }
                 }
             }

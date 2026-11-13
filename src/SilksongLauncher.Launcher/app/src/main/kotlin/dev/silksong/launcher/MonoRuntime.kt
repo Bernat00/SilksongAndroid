@@ -184,7 +184,13 @@ object MonoRuntime {
          * device's rather than the settings'.
          */
         fun tighter(): Budget? = when {
-            heapMb <= 0 -> Budget(cores.coerceAtMost(4), 1024)
+            // First tightening keeps as many cores as it drops heap: the
+            // reclaimed run died of peak RSS, so halving the heap is what
+            // matters, and the cores are what make it fast. 1792 MB is the
+            // honest minimum for the il2cpp metadata phase on this game --
+            // 1024 MB there meant GC thrash that burned 4 cores at 100% for
+            // 15 minutes producing 0 files (the "stuck at 0%" report).
+            heapMb <= 0 -> Budget(cores.coerceAtMost(6), 1792)
             cores <= 1 && heapMb <= FLOOR_HEAP_MB -> null
             else -> Budget((cores / 2).coerceAtLeast(1), (heapMb / 2).coerceAtLeast(FLOOR_HEAP_MB))
         }
