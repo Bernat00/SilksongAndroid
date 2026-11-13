@@ -216,19 +216,6 @@ public class VirtualPad : MonoBehaviour
         for (int i = 0; i < device.Buttons.Length; i++) device.Buttons[i] = false;
         device.Stick = Vector2.zero;
 
-        // DIAGNOSTIC (debug builds): every two seconds, one line with the
-        // whole decision state, so a non-working pad names its reason.
-        _diagTimer -= Time.unscaledDeltaTime;
-        if (_diagTimer <= 0f)
-        {
-            _diagTimer = 2f;
-            var mask = 0;
-            for (int i = 0; i < device.Buttons.Length; i++) if (device.Buttons[i]) mask |= 1 << i;
-            Debug.Log($"[VPad] gs={(int)gm_GameState()} vis={visible} incl={includedDevices} " +
-                $"attached={deviceAttached} setActions={actionsSet} stick={device.Stick.x:F2},{device.Stick.y:F2} " +
-                $"btns=0x{mask:X2} fingers={stickFinger},{string.Join(",", buttonFinger)}");
-        }
-
         // GAMEPLAY ONLY, with a short hysteresis: the game's state can bob
         // in and out of PLAYING between scenes, and an overlay that
         // disappears for a frame and returns reads as a flicter.
@@ -237,6 +224,26 @@ public class VirtualPad : MonoBehaviour
         visible = (Time.unscaledTime - lastPlayingTime) < 1.5f;
 
         if (visible) RouteTouches();
+
+        // DIAGNOSTIC (debug builds), AFTER routing above. It used to run
+        // BEFORE it: the device is zeroed every frame before routing, so the
+        // snapshot printed btns=0x00 and stick=0.00 REGARDLESS of real input
+        // -- several debug rounds chased that ghost. It also reports the GUI
+        // matrix the pad inherited: the game's own IMGUI sets GUI.matrix, a
+        // matrix persists into later OnGUI callbacks, and a pad drawn under
+        // a foreign matrix lands where its hit test does not look.
+        _diagTimer -= Time.unscaledDeltaTime;
+        if (_diagTimer <= 0f)
+        {
+            _diagTimer = 2f;
+            var mask = 0;
+            for (int i = 0; i < device.Buttons.Length; i++) if (device.Buttons[i]) mask |= 1 << i;
+            var m = GUI.matrix;
+            Debug.Log($"[VPad] gs={(int)gm_GameState()} vis={visible} incl={includedDevices} " +
+                $"attached={deviceAttached} setActions={actionsSet} stick={device.Stick.x:F2},{device.Stick.y:F2} " +
+                $"btns=0x{mask:X2} fingers={stickFinger},{string.Join(",", buttonFinger)} " +
+                $"mat={m.m00:F2},{m.m03:F1},{m.m11:F2},{m.m13:F1}");
+        }
     }
 
     void OnDestroy()
@@ -258,6 +265,8 @@ public class VirtualPad : MonoBehaviour
 
             if (t.fingerId == stickFinger)
             {
+                if (t.phase == TouchPhase.Moved && Time.frameCount % 30 == 0)
+                    LogTouch("moved-sample", t);
                 if (t.phase == TouchPhase.Began) LogTouch("stick-held-begin", t);
                 if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
                 {
@@ -541,6 +550,17 @@ public class VirtualPad : MonoBehaviour
 
     void OnGUI()
     {
+        // A foreign GUI.matrix (the game's own IMGUI leaves one behind; Unity
+        // does not reset it between callbacks) shifts EVERYTHING drawn here
+        // while the hit test keeps pure screen math -- drawn diamonds at
+        // 0.645w when the test looks at 0.845w, and per-frame jitter between
+        // the two = the flicker. Identity first, inheritance logged.
+        var inheritedMatrix = GUI.matrix;
+        GUI.matrix = Matrix4x4.identity;
+        if (Time.frameCount % 90 == 0)
+            Debug.Log($"[VPadm] mat0={inheritedMatrix.m00:F2},{inheritedMatrix.m03:F1}," +
+                $"{inheritedMatrix.m11:F2},{inheritedMatrix.m13:F1}");
+
         if (!visible) return;
         RefreshStylesIfNeeded();
 
