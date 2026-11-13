@@ -63,9 +63,8 @@ class LogActivity : Activity() {
         // the very build being complained about.
         text.text = "Reading the log…"
         scope.launch {
-            val report = withContext(Dispatchers.IO) { report() }
-            full = report
-            show(report)
+            full = withContext(Dispatchers.IO) { report(null) }
+            show(withContext(Dispatchers.IO) { report(GAME_TAIL_KB) })
         }
     }
 
@@ -120,27 +119,35 @@ class LogActivity : Activity() {
      * lose the header, and a report whose first question is "which phone?" is
      * a round trip nobody needs.
      */
-    private fun report(): String {
+    private fun report(gameTailKb: Int?): String {
         val history = LauncherLog.history(this)
-        val body = if (history.isNotBlank()) history else LauncherLog.snapshot().joinToString("\n")
+            val body = if (history.isNotBlank()) history else LauncherLog.snapshot().joinToString("\n")
         return buildString {
             append("SilksongAndroid ").append(appVersion()).append('\n')
             append(LauncherLog.deviceSummary()).append('\n')
             append('\n')
-            append(if (body.isBlank()) "(no log yet)" else body)
-
-            // The game's own log, appended after the launcher's rather than
-            // interleaved with it. The two come from different processes, and
-            // the engine's is the only one that carries the reason a save
-            // failed -- which is the whole point of collecting it.
+            // Game captures first, each capped on screen. The screen, the
+            // Copy and the Share all take the TAIL of this string (a
+            // TextView cannot hold it whole; a Binder cannot carry it),
+            // and the launcher's own record is what the reader of that tail
+            // needs -- which is why it is appended LAST. The prior order
+            // hid it entirely below the game's raw captures: this is why
+            // the 22:04 port was "not in the logs".
             for (f in LauncherLog.gameLogs(this@LogActivity)) {
                 val text = runCatching {
                     f.takeIf { it.isFile }?.readText()
                 }.getOrNull()
                 if (text.isNullOrBlank()) continue
                 append("\n\n===== ").append(f.name).append(" =====\n")
-                append(text)
+                if (gameTailKb != null && text.length > gameTailKb * 1024) {
+                    append("(showing the last ").append(gameTailKb)
+                        .append(" KB of ").append(text.length / 1024)
+                        .append(" KB; Save writes the full capture)\n")
+                    append(tail(text, gameTailKb * 1024))
+                } else append(text)
             }
+            append("\n\n===== launcher.log -- what the launcher recorded =====\n")
+            append(if (body.isBlank()) "(no log yet)" else body)
         }
     }
 
@@ -243,7 +250,7 @@ class LogActivity : Activity() {
      * TransactionTooLargeException from somewhere unrelated. The tail is the
      * part worth keeping: a failure explains itself at the end.
      */
-    private fun sendable(): String = tail(full.ifBlank { report() }, MAX_SENDABLE)
+    private fun sendable(): String = tail(full.ifBlank { report(null) }, MAX_SENDABLE)
 
     private fun share() {
         val body = sendable()
@@ -303,7 +310,7 @@ class LogActivity : Activity() {
                 try {
                     // Read again if Save was pressed before the load finished,
                     // rather than silently writing an empty file.
-                    val body = full.ifBlank { report() }
+                    val body = full.ifBlank { report(null) }
                     contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }
                         ?: return@withContext "the picker returned nothing to write to"
                     null
@@ -324,6 +331,9 @@ class LogActivity : Activity() {
     private companion object {
         /** Characters handed to the TextView. See [show]. */
         const val MAX_ON_SCREEN = 64 * 1024
+
+        /** Per-game-file cap on screen; Save writes every byte. */
+        const val GAME_TAIL_KB = 8
 
         /** Below this, selection is cheap enough to leave on. */
         const val MAX_SELECTABLE = 16 * 1024
