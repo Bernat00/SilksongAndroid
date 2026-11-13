@@ -135,6 +135,7 @@ public class VirtualPad : MonoBehaviour
     bool actionsSet;                   // the IncludeDevices hammer was placed
     float lastPlayingTime = -99f;
     bool includedDevices;
+    int includeTries;
 
     GUIStyle labelStyle;
     int styleScreenWidth, styleScreenHeight;
@@ -239,7 +240,10 @@ public class VirtualPad : MonoBehaviour
             var mask = 0;
             for (int i = 0; i < device.Buttons.Length; i++) if (device.Buttons[i]) mask |= 1 << i;
             var m = GUI.matrix;
+            var dgm = GameManager._instance;
+            var dh = dgm != null ? dgm.inputHandler : null;
             Debug.Log($"[VPad] gs={(int)gm_GameState()} vis={visible} incl={includedDevices} " +
+                $"gm={dgm != null} h={dh != null} a={dh != null && dh.inputActions != null} incTries={includeTries} " +
                 $"attached={deviceAttached} setActions={actionsSet} stick={device.Stick.x:F2},{device.Stick.y:F2} " +
                 $"btns=0x{mask:X2} fingers={stickFinger},{string.Join(",", buttonFinger)} " +
                 $"mat={m.m00:F2},{m.m03:F1},{m.m11:F2},{m.m13:F1}");
@@ -400,6 +404,7 @@ public class VirtualPad : MonoBehaviour
         // lose that race. IncludeDevices pins this device into the set's
         // polling regardless of arbitration — every action here reads it
         // directly, every frame, always.
+        includeTries++;
         try { actions.IncludeDevices.Add(device); includedDevices = true; } catch (Exception) { }
         for (int i = 0; i < Defaults.Length; i++)
         {
