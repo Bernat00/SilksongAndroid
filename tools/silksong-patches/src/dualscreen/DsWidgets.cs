@@ -1,0 +1,491 @@
+// DsWidgets — the small set of things every screen is built from.
+//
+// Deliberately thin. This is not a UI framework: it is the four or five shapes
+// the second screen actually needs (a rect, a label, an icon, a bordered
+// panel), with the layer and the font already correct so no screen has to
+// remember either. Everything returns the RectTransform, because that is what
+// layout code wants next.
+//
+// Nothing here creates a raycast target. The second screen has no EventSystem
+// and no GraphicRaycaster -- we own every rect on it and hit-test our own
+// rectangles -- so leaving raycastTarget on would only cost layout work.
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+using UnityEngine;
+using UnityEngine.UI;
+using TmpText = TMProOld.TextMeshProUGUI;
+using TmpAlign = TMProOld.TextAlignmentOptions;
+
+public static class DsWidgets
+{
+    public static RectTransform Rect(Transform parent, string name)
+    {
+        var go = new GameObject(name) { layer = DsPresentation.LAYER };
+        var rt = go.AddComponent<RectTransform>();
+        rt.SetParent(parent, false);
+        return rt;
+    }
+
+    /// <summary>A solid block of colour.</summary>
+    public static Image Box(Transform parent, string name, Color color)
+    {
+        var rt = Rect(parent, name);
+        var img = rt.gameObject.AddComponent<Image>();
+        img.sprite = DsTheme.White;
+        img.color = color;
+        img.raycastTarget = false;
+        return img;
+    }
+
+    /// <summary>A solid circle. Slots are round in the game.</summary>
+    public static Image Circle(Transform parent, string name, Color color)
+    {
+        var rt = Rect(parent, name);
+        var img = rt.gameObject.AddComponent<Image>();
+        img.sprite = DsTheme.Disc;
+        img.color = color;
+        img.raycastTarget = false;
+        return img;
+    }
+
+    /// <summary>
+    /// A filled rect with a one-pixel-ish border, drawn as five boxes.
+    ///
+    /// This is for CONTROLS, not for sections. Sections on this panel are
+    /// divided by a rule (see HRule/VRule) rather than boxed, which means a box
+    /// is no longer decoration -- it is the panel's only remaining signal that
+    /// something can be tapped, and it should be spent on nothing else.
+    /// </summary>
+    public static RectTransform Panel(Transform parent, string name, Color fill, Color edge, float thickness = 2f)
+    {
+        var root = Rect(parent, name);
+        var bg = Box(root, "fill", fill);
+        Stretch(bg.rectTransform);
+
+        Edge(root, "e-top",    new Vector2(0f, 1f), new Vector2(1f, 1f), thickness, true,  edge);
+        Edge(root, "e-bottom", new Vector2(0f, 0f), new Vector2(1f, 0f), thickness, true,  edge);
+        Edge(root, "e-left",   new Vector2(0f, 0f), new Vector2(0f, 1f), thickness, false, edge);
+        Edge(root, "e-right",  new Vector2(1f, 0f), new Vector2(1f, 1f), thickness, false, edge);
+        return root;
+    }
+
+    static void Edge(Transform parent, string name, Vector2 aMin, Vector2 aMax,
+                     float thickness, bool horizontal, Color color)
+    {
+        var rt = Box(parent, name, color).rectTransform;
+        rt.anchorMin = aMin;
+        rt.anchorMax = aMax;
+        rt.sizeDelta = horizontal ? new Vector2(0f, thickness) : new Vector2(thickness, 0f);
+        rt.anchoredPosition = Vector2.zero;
+    }
+
+    // ── rules ───────────────────────────────────────────────────────────────
+    //
+    // The panel divides its sections with a line between them rather than a box
+    // around each. The difference is not only taste: a box has four sides and
+    // three of them border nothing, so a screen with a character panel, a grid
+    // and a description pane was drawing twelve edges to express two
+    // boundaries. It read as a form rather than as a page, and on a 9 cm screen
+    // the frames were competing with the art inside them.
+    //
+    // Both take the rule's CENTRE LINE, because that is what a gutter has: the
+    // caller knows the two columns are 540 and 560, and 550 is the answer. It
+    // also means the thickness can change in one place without moving anything.
+
+    /// <summary>A rule across a boundary. <paramref name="y"/> is its centre line.</summary>
+    public static RectTransform HRule(Transform parent, string name, float x, float y, float length)
+    {
+        var rt = RuleImage(parent, name, DsRuleArt.Horizontal).rectTransform;
+        Place(rt, x, y - DsTheme.RuleThickness * 0.5f, length, DsTheme.RuleThickness);
+        return rt;
+    }
+
+    /// <summary>A rule down a gutter. <paramref name="x"/> is its centre line.</summary>
+    public static RectTransform VRule(Transform parent, string name, float x, float y, float length)
+    {
+        var rt = RuleImage(parent, name, DsRuleArt.Vertical).rectTransform;
+        Place(rt, x - DsTheme.RuleThickness * 0.5f, y, DsTheme.RuleThickness, length);
+        return rt;
+    }
+
+    /// <summary>
+    /// The cap that marks a group inside a grid. <paramref name="y"/> is the
+    /// line it leaves from, not the top of the art.
+    ///
+    /// Drawn at its own size and never stretched: the cap is a vertical tick
+    /// with a stroke trailing off it, and stretching would smear the tick into
+    /// a bar. It is only ever shrunk, and then in proportion, for a column too
+    /// narrow to seat it.
+    /// </summary>
+    public static RectTransform SectionRule(Transform parent, string name, float x, float y,
+                                            float maxLength, Color color)
+    {
+        var art = DsRuleArt.Section;
+        if (art == null)
+        {
+            // What this screen drew before the art existed.
+            var plain = Box(parent, name, color).rectTransform;
+            Place(plain, x, y - DsTheme.RuleThickness * 0.5f, maxLength, DsTheme.RuleThickness);
+            return plain;
+        }
+
+        float w = Mathf.Min(DsRuleArt.SectionW, maxLength);
+        float h = DsRuleArt.SectionH * (w / DsRuleArt.SectionW);
+        var rt = RuleImage(parent, name, art, color).rectTransform;
+        Place(rt, x, y - h * (DsRuleArt.SectionLine / DsRuleArt.SectionH), w, h);
+        return rt;
+    }
+
+    /// <summary>
+    /// A rule's Image, drawn as a plain stretched quad.
+    ///
+    /// useSpriteMesh is deliberately OFF, where DsWidgets.Icon has it on. A tight
+    /// sprite mesh samples only the drawn geometry, which is right for an atlas
+    /// icon and wrong here: these lines are mostly transparent by design, and a
+    /// trimmed mesh would crop away the very taper that is the decoration.
+    /// </summary>
+    static Image RuleImage(Transform parent, string name, Sprite art, Color? tint = null)
+    {
+        var rt = Rect(parent, name);
+        var img = rt.gameObject.AddComponent<Image>();
+        img.type = Image.Type.Simple;
+        img.useSpriteMesh = false;
+        img.preserveAspect = false;
+        img.sprite = art ?? DsTheme.White;
+        // The art is pure white with the shape carried entirely in its alpha, so
+        // the panel's own bone tint still applies and the rules stay the colour
+        // the rest of the UI is.
+        img.color = tint ?? DsTheme.Rule;
+        img.raycastTarget = false;
+        return img;
+    }
+
+    /// <summary>
+    /// Text in one of the game's fonts. Returns null if none has been found
+    /// yet, which is a legitimate state early in startup.
+    ///
+    /// <paramref name="display"/> selects the caps face used for tabs and
+    /// titles. THE RULE: use it only for strings you have written yourself and
+    /// know to be uppercase. Trajan's lowercase glyphs are broken -- an "l"
+    /// renders as a stub with a black foot -- so any label carrying text FROM
+    /// THE GAME (an item name, a crest name, a zone name) must leave this false
+    /// and take the body face, which is what the game uses for the same strings
+    /// in its own UI.
+    ///
+    /// This is worth being blunt about because it does not look like a bug when
+    /// it happens: a zone header reading "She??wood" reads as a broken font, or
+    /// a broken atlas, or a missing glyph range, and the actual cause is one
+    /// boolean at the call site.
+    /// </summary>
+    public static TmpText Label(Transform parent, string name, string text, float size,
+                                Color color, TmpAlign align = TmpAlign.Left, bool display = false)
+    {
+        var rt = Rect(parent, name);
+        var t = rt.gameObject.AddComponent<TmpText>();
+        var font = display ? DsTheme.Display : DsTheme.Body;
+        if (font != null)
+        {
+            t.font = font;
+            // And the material with it. A TMP component built at runtime keeps
+            // whatever material it was constructed with, and a material carries
+            // the ATLAS TEXTURE: leave it behind and the glyph rects of one font
+            // are used to sample another font's atlas, which does not fail
+            // loudly -- most letters land on something plausible and a few come
+            // out as fragments of the wrong glyph.
+            try { if (font.material != null) t.fontSharedMaterial = font.material; } catch { }
+        }
+        t.text = text;
+        t.fontSize = size;
+        t.color = color;
+        t.alignment = align;
+        t.raycastTarget = false;
+        t.enableWordWrapping = true;
+        t.OverflowMode = TMProOld.TextOverflowModes.Truncate;
+        return t;
+    }
+
+    /// <summary>
+    /// An icon. A null sprite is normal -- the game loads art through
+    /// Addressables and it may not be resident yet -- so it draws a faint
+    /// placeholder block instead of nothing, which makes a missing icon
+    /// visible rather than mysterious.
+    ///
+    /// useSpriteMesh matters here. The game's icons are packed in atlases, and
+    /// a UI Image drawn as a plain quad samples the sprite's whole rectangle --
+    /// including the padding, which in an atlas is the NEIGHBOURING sprite.
+    /// That showed up as fragments of other icons in the corners of every cell.
+    /// Drawing the sprite's own tight mesh samples only the sprite.
+    /// </summary>
+    public static Image Icon(Transform parent, string name, Sprite sprite, Color tint)
+    {
+        var rt = Rect(parent, name);
+        var img = rt.gameObject.AddComponent<Image>();
+        img.type = Image.Type.Simple;
+        img.useSpriteMesh = true;
+        img.preserveAspect = true;
+        img.sprite = sprite;
+        // Nothing to show means show nothing. This used to fall back to a grey
+        // block, which reads as a deliberate "empty" only in a grid of slots --
+        // everywhere else it is indistinguishable from a bug, and it hid two:
+        // an empty crest socket looked filled with something unnameable, and a
+        // currency icon whose art failed to convert looked identical to one
+        // that had simply not loaded yet. Callers that do want a placeholder
+        // set one explicitly.
+        img.color = sprite != null ? tint : Color.clear;
+        img.raycastTarget = false;
+        return img;
+    }
+
+    /// <summary>
+    /// Set an icon's sprite and centre what you actually SEE, fitted in maxW x maxH.
+    ///
+    /// Icons are drawn with useSpriteMesh, which samples only the sprite's own
+    /// tight geometry and so cannot pick up a neighbouring atlas entry. The cost
+    /// is that a trimmed mesh is not centred within its sprite's rect: a symbol
+    /// with uneven transparent margins sits visibly to one side of a rect that
+    /// is itself perfectly centred.
+    ///
+    /// Sprite.bounds is that offset, in local units relative to the pivot, so
+    /// the fix is to shift the rect back by it rather than to change how the
+    /// sprite is drawn. Sizing the rect to the sprite's own aspect first makes
+    /// preserveAspect a no-op, which keeps the arithmetic honest -- otherwise
+    /// the drawn size is not the rect size and the offset would be scaled wrong.
+    /// </summary>
+    public static void FitCentred(Image img, Sprite sprite, float maxW, float maxH)
+    {
+        if (img == null || sprite == null) return;
+
+        img.sprite = sprite;
+        img.color = Color.white;
+
+        var full = sprite.rect;
+        float aspect = full.width / Mathf.Max(full.height, 1f);
+        float w = maxW, h = maxH;
+        if (w / Mathf.Max(h, 1f) > aspect) w = h * aspect; else h = w / Mathf.Max(aspect, 0.0001f);
+
+        var rt = img.rectTransform;
+        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(w, h);
+
+        // The mesh's centre, as a fraction of the full sprite rect.
+        float ppu = sprite.pixelsPerUnit;
+        if (ppu <= 0f) ppu = 100f;
+        Vector2 unitsFull = new Vector2(full.width / ppu, full.height / ppu);
+        Vector3 c = sprite.bounds.center;
+        Vector2 frac = new Vector2(
+            unitsFull.x > 0f ? c.x / unitsFull.x : 0f,
+            unitsFull.y > 0f ? c.y / unitsFull.y : 0f);
+
+        rt.anchoredPosition = new Vector2(-frac.x * w, -frac.y * h);
+    }
+
+    /// <summary>
+    /// Set an icon's sprite and size it so the sprite's VISIBLE INK fills
+    /// maxW x maxH, rather than its rectangle.
+    ///
+    /// The difference is the whole point. The game's slot symbols are 181x181
+    /// sprites with a small glyph adrift in a sea of transparency; fitted by
+    /// their RECT -- which is what FitCentred does -- a symbol asked to fill
+    /// four-fifths of a socket drew at about a quarter of it, and no amount of
+    /// raising the fraction fixed it because the padding scaled with the glyph.
+    ///
+    /// Sprite.bounds is the trimmed mesh, so the ratio of it to the full rect
+    /// says how much of the sprite is ink. Sizing by that makes the request
+    /// mean what it says: "this much of the socket, filled".
+    /// </summary>
+    public static void FitInk(Image img, Sprite sprite, float maxW, float maxH)
+    {
+        if (img == null || sprite == null) return;
+
+        float ppu = sprite.pixelsPerUnit;
+        if (ppu <= 0f) ppu = 100f;
+
+        var full = sprite.rect;
+        float inkW = sprite.bounds.size.x * ppu;
+        float inkH = sprite.bounds.size.y * ppu;
+
+        // A sprite with no trim, or one we cannot measure, is its own rect.
+        if (inkW <= 0.01f || inkH <= 0.01f || full.width <= 0f || full.height <= 0f)
+        {
+            FitCentred(img, sprite, maxW, maxH);
+            return;
+        }
+
+        img.sprite = sprite;
+        img.color = Color.white;
+
+        float scale = Mathf.Min(maxW / inkW, maxH / inkH);
+        float w = full.width * scale;
+        float h = full.height * scale;
+
+        var rt = img.rectTransform;
+        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(w, h);
+
+        // The ink's centre, as a fraction of the full rect -- the same
+        // correction FitCentred makes, for the same reason: a trimmed mesh is
+        // not centred in the rect it was trimmed from.
+        Vector2 unitsFull = new Vector2(full.width / ppu, full.height / ppu);
+        Vector3 c = sprite.bounds.center;
+        Vector2 frac = new Vector2(
+            unitsFull.x > 0f ? c.x / unitsFull.x : 0f,
+            unitsFull.y > 0f ? c.y / unitsFull.y : 0f);
+
+        rt.anchoredPosition = new Vector2(-frac.x * w, -frac.y * h);
+    }
+
+    /// <summary>
+    /// The box an <see cref="Icon"/> actually PAINTS inside the box it was
+    /// <see cref="Place"/>d in.
+    ///
+    /// For putting a cursor on one. An icon's rect is not its ink: the art is
+    /// fitted to the sprite's own aspect inside a square rect, and a sprite
+    /// trimmed in an atlas carries an offset besides -- so brackets hung on the
+    /// rect's corners frame a box the eye cannot see, and land off-centre by
+    /// however far the trim is uneven.
+    ///
+    /// This is Image.GenerateSprite's own arithmetic, spelled out rather than
+    /// approximated, because there are three separate things moving the ink and
+    /// missing any one of them leaves the cursor crooked in a way that looks
+    /// like a rounding error:
+    ///
+    ///   * preserveAspect fits the sprite's FULL rect into the rect, which is
+    ///     what sets the drawn size;
+    ///   * the mesh is then mapped through `vertex / bounds.size * drawnSize`,
+    ///     so how much of the drawn size the ink covers is the ratio of the two;
+    ///   * and it is finally shifted by `(rectPivot - spritePivot) * drawnSize`,
+    ///     which for our top-left-pivoted widgets is most of their own size.
+    ///
+    /// The mesh's own corners are read from Sprite.vertices rather than from
+    /// Sprite.bounds, so the answer does not depend on which of the two that
+    /// property turns out to describe.
+    ///
+    /// Only for icons drawn the way <see cref="Icon"/> draws them -- with
+    /// useSpriteMesh. A plain quad is placed by the sprite's PADDING instead,
+    /// which is different arithmetic.
+    /// </summary>
+    public static UnityEngine.Rect InkRect(Image img, UnityEngine.Rect box)
+    {
+        if (img == null || img.sprite == null || !img.useSpriteMesh) return box;
+        var sprite = img.sprite;
+
+        Vector2 full = sprite.rect.size;
+        if (full.x <= 0f || full.y <= 0f) return box;
+
+        float dw = box.width, dh = box.height;
+        if (img.preserveAspect)
+        {
+            float aspect = full.x / full.y;
+            if (dw / Mathf.Max(dh, 0.0001f) > aspect) dw = dh * aspect;
+            else dh = dw / Mathf.Max(aspect, 0.0001f);
+        }
+
+        Vector3 bounds = sprite.bounds.size;
+        if (bounds.x <= 0.0001f || bounds.y <= 0.0001f) return box;
+
+        Vector2 mid, ink;
+        if (!MeshBox(sprite, out mid, out ink)) return box;
+
+        Vector2 rectPivot = img.rectTransform.pivot;
+        Vector2 spritePivot = new Vector2(sprite.pivot.x / full.x, sprite.pivot.y / full.y);
+
+        // Where the mesh's centre lands, relative to the rect's own pivot.
+        float cx = (mid.x / bounds.x - (rectPivot.x - spritePivot.x)) * dw;
+        float cy = (mid.y / bounds.y - (rectPivot.y - spritePivot.y)) * dh;
+        float iw = (ink.x / bounds.x) * dw;
+        float ih = (ink.y / bounds.y) * dh;
+
+        // That space is y-UP from the pivot; a placed box is y-down from its
+        // top-left corner, which is (pivot.x, 1 - pivot.y) of the way into it.
+        float px = box.x + rectPivot.x * box.width + cx;
+        float py = box.y + (1f - rectPivot.y) * box.height - cy;
+        return new UnityEngine.Rect(px - iw * 0.5f, py - ih * 0.5f, iw, ih);
+    }
+
+    public static Vector2 MeshSize(Sprite sprite)
+    {
+        Vector2 mid, size;
+        return sprite != null && MeshBox(sprite, out mid, out size) ? size : Vector2.zero;
+    }
+
+    /// <summary>
+    /// A sprite mesh's corners, in the units and about the pivot that
+    /// Image.GenerateSprite maps from. Both are zero for a sprite with no mesh
+    /// worth measuring.
+    /// </summary>
+    static bool MeshBox(Sprite sprite, out Vector2 mid, out Vector2 size)
+    {
+        mid = Vector2.zero;
+        size = Vector2.zero;
+
+        Vector2[] v;
+        try { v = sprite.vertices; } catch { return false; }
+        if (v == null || v.Length == 0) return false;
+
+        float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+        for (int i = 1; i < v.Length; i++)
+        {
+            if (v[i].x < x0) x0 = v[i].x; else if (v[i].x > x1) x1 = v[i].x;
+            if (v[i].y < y0) y0 = v[i].y; else if (v[i].y > y1) y1 = v[i].y;
+        }
+
+        mid = new Vector2((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+        size = new Vector2(x1 - x0, y1 - y0);
+        return size.x > 0.0001f && size.y > 0.0001f;
+    }
+
+    public static void Stretch(RectTransform rt, float pad = 0f)
+    {
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.offsetMin = new Vector2(pad, pad);
+        rt.offsetMax = new Vector2(-pad, -pad);
+    }
+
+    public static Image CursorCorner(RectTransform parent, string name, Sprite sprite,
+                                     Vector2 anchor, bool rotate, float size, float inset)
+    {
+        var img = Icon(parent, name, sprite, Color.white);
+        var rt = img.rectTransform;
+        rt.anchorMin = rt.anchorMax = anchor;
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(size, size);
+        rt.anchoredPosition = new Vector2(anchor.x < 0.5f ? inset : -inset,
+                                          anchor.y < 0.5f ? inset : -inset);
+        if (rotate) rt.localRotation = Quaternion.Euler(0f, 0f, 180f);
+        img.gameObject.SetActive(false);
+        return img;
+    }
+
+    public static void Place(RectTransform rt, UnityEngine.Rect bounds)
+    {
+        Place(rt, bounds.x, bounds.y, bounds.width, bounds.height);
+    }
+
+    /// <summary>Place a rect by top-left corner, in panel pixels with y down.</summary>
+    public static void Place(RectTransform rt, float x, float y, float w, float h)
+    {
+        rt.anchorMin = rt.anchorMax = new Vector2(0f, 1f);
+        rt.pivot = new Vector2(0f, 1f);
+        rt.anchoredPosition = new Vector2(x, -y);
+        rt.sizeDelta = new Vector2(w, h);
+    }
+
+    public static UnityEngine.Rect PlacedRect(RectTransform space, RectTransform rt)
+    {
+        var corners = new Vector3[4];
+        rt.GetWorldCorners(corners);
+        Vector3 min = space.InverseTransformPoint(corners[0]);
+        Vector3 max = space.InverseTransformPoint(corners[2]);
+        var area = space.rect;
+        return new UnityEngine.Rect(min.x - area.xMin, area.yMax - max.y, max.x - min.x, max.y - min.y);
+    }
+
+    public static void SetActive(Component c, bool on)
+    {
+        if (c != null && c.gameObject.activeSelf != on) c.gameObject.SetActive(on);
+    }
+}
+#endif

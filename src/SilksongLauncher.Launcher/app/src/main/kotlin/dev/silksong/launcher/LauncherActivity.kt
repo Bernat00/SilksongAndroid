@@ -1,0 +1,969 @@
+// LauncherActivity — the menu, and the app's entry point once the game has
+// been built. GameActivity is a regular non-launchable Activity, invoked only
+// via the Intent in launchGame().
+//
+// One panel: a button stack (Log in, Pull saves, Push saves, Settings, Launch
+// game) beside a live mirror of LauncherLog, so the user can see what is
+// happening end to end. Login state is persisted via TokenStore.
+
+package dev.silksong.launcher
+
+import android.app.Activity
+import android.content.Intent
+import android.os.Bundle
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TextView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+class LauncherActivity : Activity() {
+
+    private companion object {
+        // The game is the depot-built player in this same package. It is not
+        // Unity's own activity: dev.silksong.shell.GameActivity owns the
+        // window and points the engine's library lookup at app storage.
+        private const val UNITY_ACTIVITY_CLASS = "dev.silksong.shell.GameActivity"
+
+        private const val REQ_LOGIN = 1
+    }
+
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    // Panels.
+    private lateinit var launchPanel: LinearLayout
+
+    // Launch-panel widgets.
+    private lateinit var txtLoginStatus: TextView
+    private lateinit var btnLogin: Button
+    private lateinit var btnGogLogin: Button
+    private lateinit var btnPull: Button
+    private lateinit var btnPush: Button
+    private lateinit var spinPull: ProgressBar
+    private lateinit var spinPush: ProgressBar
+    private lateinit var btnMods: Button
+    private lateinit var btnSettings: Button
+    private lateinit var btnLogs: Button
+    private lateinit var btnLaunch: Button
+
+    /**
+     * One player-class repair per visit to this screen. See
+     * [repairPlayerClasses].
+     */
+    private var repairAttempted = false
+    private lateinit var logScroll: ScrollView
+    private lateinit var txtLog: TextView
+
+    private lateinit var tokenStore: TokenStore
+    private lateinit var settings: SettingsStore
+    private var creds: TokenStore.Credentials? = null
+
+    // True between launchGame() and the next onResume. Drives the
+    // auto-push trigger: only push when we just returned from the game
+    // (so a casual "user opened the launcher to read the log" doesn't
+    // fire a push).
+    private var returningFromGame: Boolean = false
+
+    // Reentrancy guard for cloud operations — manual + auto can both
+    // schedule pulls/pushes and we don't want overlapping sessions on
+    // the same Steam account.
+    private var cloudJob: Job? = null
+
+    // Mirrors LauncherLog into the on-screen log panel.
+    private val logListener = LauncherLog.Listener { _, snapshot ->
+        runOnUiThread {
+            txtLog.text = snapshot.joinToString("\n")
+            logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        setContentView(R.layout.activity_launcher)
+
+        launchPanel = findViewById(R.id.launch_panel)
+        txtLoginStatus = findViewById(R.id.txt_login_status)
+        btnLogin = findViewById(R.id.btn_login)
+        btnGogLogin = findViewById(R.id.btn_gog_login)
+        btnGogLogin.setOnClickListener { onGogLoginClicked() }
+        refreshGogLoginLabel()
+        btnPull = findViewById(R.id.btn_pull)
+        btnPush = findViewById(R.id.btn_push)
+        spinPull = findViewById(R.id.spin_pull)
+        spinPush = findViewById(R.id.spin_push)
+        btnMods = findViewById(R.id.btn_mods)
+        btnSettings = findViewById(R.id.btn_settings)
+        btnLogs = findViewById(R.id.btn_logs)
+        btnLaunch = findViewById(R.id.btn_launch)
+        logScroll = findViewById(R.id.log_scroll)
+        txtLog = findViewById(R.id.txt_log)
+
+        // Seed log mirror with any messages emitted before we attached.
+        txtLog.text = LauncherLog.snapshot().joinToString("\n")
+        LauncherLog.addListener(logListener)
+
+        tokenStore = TokenStore(this)
+        settings = SettingsStore(this)
+        creds = tokenStore.read()
+        refreshLoginUi()
+        LauncherLog.log("Launcher ready. Logged in: ${creds != null}")
+
+        // Attach click listeners up front — independent of which panel
+        // is visible. setOnClickListener registers on the View object
+        // itself; visibility transitions don't unregister anything.
+        // Doing it here (vs deferring into showLaunchPanel's post()) is
+        // important because the Ayn Thor's built-in gamepad input puts
+        // Android into "non-touch focus mode": tap-1 just moves focus,
+        // tap-2 fires the click — which was the actual two-press bug.
+        // Setting listeners early + NEVER calling requestFocus() keeps
+        // the activity in touch mode where tap = click.
+        btnLogin.setOnClickListener { onLoginClicked() }
+        btnPull.setOnClickListener { onPullClicked() }
+        btnPush.setOnClickListener { onPushClicked() }
+        btnMods.setOnClickListener {
+            startActivity(Intent(this, ModsActivity::class.java))
+        }
+        btnSettings.setOnClickListener { onSettingsClicked() }
+        btnLogs.setOnClickListener {
+            startActivity(Intent(this, LogActivity::class.java))
+        }
+        btnLaunch.setOnClickListener { onLaunchClicked() }
+
+        showLaunchPanel()
+    }
+
+    override fun onDestroy() {
+        LauncherLog.removeListener(logListener)
+        uiScope.cancel()
+        super.onDestroy()
+    }
+
+    // ── State transitions ──────────────────────────────────────────────
+
+    private fun showLaunchPanel() {
+        launchPanel.visibility = View.VISIBLE
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Auto-push fires after the user returns from playing the
+        // game. We use a flag (set in launchGame) instead of just
+        // "always on resume" so dismissing dialogs / opening
+        // Settings + coming back doesn't trigger a push.
+        if (returningFromGame) {
+            returningFromGame = false
+            maybeAutoPush()
+        }
+    }
+
+    // ── Login ──────────────────────────────────────────────────────────
+
+    private fun onLoginClicked() {
+        if (creds != null) {
+            // Logged in already — this button doubles as "log out".
+            LauncherLog.log("Logged out")
+            tokenStore.clear()
+            creds = null
+            refreshLoginUi()
+            return
+        }
+        @Suppress("DEPRECATION")
+        startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
+    }
+
+    @Deprecated("Use the Activity Result APIs — fine for Phase 1 scaffolding")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 7123) {
+            val ok = resultCode == GogLoginActivity.RESULT_SIGNED_IN
+            LauncherLog.log("GOG sign-in: " + if (ok) "succeeded" else "did not finish")
+            refreshGogLoginLabel()
+            return
+        }
+        if (requestCode != REQ_LOGIN) return
+        if (resultCode != RESULT_OK || data == null) {
+            LauncherLog.log("Login cancelled")
+            return
+        }
+        val account = data.getStringExtra(LoginActivity.EXTRA_ACCOUNT)
+        val token = data.getStringExtra(LoginActivity.EXTRA_TOKEN)
+        if (account.isNullOrEmpty() || token.isNullOrEmpty()) {
+            LauncherLog.log("Login returned without account/token")
+            return
+        }
+        val newCreds = TokenStore.Credentials(account, token)
+        tokenStore.write(newCreds)
+        creds = newCreds
+        LauncherLog.log("Steam credentials saved")
+        refreshLoginUi()
+    }
+
+    private fun refreshLoginUi() {
+        val c = creds
+        if (c == null) {
+            txtLoginStatus.text = ""
+            btnLogin.text = getString(R.string.action_log_in)
+        } else {
+            txtLoginStatus.text = "Signed in as ${c.accountName}"
+            btnLogin.text = getString(R.string.action_log_in_as)
+        }
+        // The manual Download/Upload buttons serve EITHER store, and say
+        // which: a GOG depot renames them Sync/… and the STEAM pair is
+        // hidden entirely unless a Steam session exists — a hidden button
+        // that does nothing is still a button in the way.
+        val gogOwns = GogSync.gogDepotPresent(this)
+        val gogUsable = gogOwns && GogAuth.isSignedIn(this)
+        val steamOwns = c != null && !gogOwns
+        if (gogOwns) {
+            btnPull.text = "Sync saves"
+            btnPush.text = ""
+            btnPull.visibility = android.view.View.VISIBLE
+            btnPush.visibility = android.view.View.GONE
+            btnPull.isEnabled = gogUsable
+        } else {
+            btnPull.text = getString(R.string.action_pull_saves)
+            btnPush.text = getString(R.string.action_push_saves)
+            btnPull.visibility = if (steamOwns) android.view.View.VISIBLE else android.view.View.GONE
+            btnPush.visibility = if (steamOwns) android.view.View.VISIBLE else android.view.View.GONE
+            btnPull.isEnabled = steamOwns
+            btnPush.isEnabled = steamOwns
+        }
+    }
+
+    // ── Cloud save: pull (Phase 1c) ────────────────────────────────────
+
+    private fun onPullClicked() {
+        // GOG depot first: the depot decides the store, the store decides the
+        // credentials. A GOG build with a signed-in account syncs against
+        // GOG's bucket and never touches Steam.
+        val depot = DepotLocation.resolve(this)
+        if (GogCloud.isGogDepot(depot)) {
+            if (!GogAuth.isSignedIn(this)) {
+                LauncherLog.log("Pull: GOG depot, but not signed in to GOG")
+                return
+            }
+            runCloudJob(spinPull, btnPull, R.string.action_pull_saves_busy) {
+                gogPullFlow(depot, source = "manual", mode = "sync")
+            }
+            return
+        }
+        val c = creds
+        if (c == null) {
+            LauncherLog.log("Pull: not logged in")
+            return
+        }
+        runCloudJob(spinPull, btnPull, R.string.action_pull_saves_busy) { pullFlow(c, source = "manual") }
+    }
+
+    /**
+     * Shared analyze + conflict-prompt + download pipeline used by the
+     * Pull button and the pre-launch sync. Either pulls EVERYTHING the
+     * analyzer flagged (safe set + conflicts when the user keeps remote)
+     * or pulls NOTHING — never a per-slot mix.
+     *
+     * Returns true if the caller may proceed (synced, nothing to do, or
+     * the conflict was resolved by keeping local/remote); false only
+     * when the user cancelled an unresolved conflict — the pre-launch
+     * path uses that to abort the game launch.
+     */
+    private suspend fun pullFlow(c: TokenStore.Credentials, source: String): Boolean {
+        try {
+            LauncherLog.log("Analyzing cloud vs local saves ($source pull)…")
+            val analysis = CloudSync.analyzePull(this@LauncherActivity, c)
+
+            if (analysis.toDownload.isEmpty() && analysis.conflicts.isEmpty()) {
+                LauncherLog.log("Pull: nothing newer on cloud")
+                return true
+            }
+
+            if (analysis.hasConflicts) {
+                when (confirmConflictResolution(analysis.conflicts.map { it.localFile.name }, newerSide = "local")) {
+                    ConflictChoice.KEEP_LOCAL -> {
+                        LauncherLog.log("Conflict: keep local — pushing local saves over cloud")
+                        pushLocalOverCloud(c)
+                        return true
+                    }
+                    ConflictChoice.CANCEL -> {
+                        LauncherLog.log("Pull cancelled by user (local is newer for ${analysis.conflicts.size} file(s))")
+                        return false
+                    }
+                    ConflictChoice.KEEP_REMOTE -> {
+                        // Fall through: download EVERYTHING flagged (safe +
+                        // conflicts), clobbering the newer local copies with
+                        // cloud. All-or-nothing — never a mix of slots.
+                        LauncherLog.log("Conflict: keep remote — overwriting local with cloud")
+                    }
+                }
+                CloudSync.pullItems(this@LauncherActivity, c, analysis.toDownload + analysis.conflicts).collect { }
+            } else {
+                CloudSync.pullItems(this@LauncherActivity, c, analysis.toDownload).collect { }
+            }
+            return true
+        } catch (t: Throwable) {
+            LauncherLog.log("Pull failed: ${t.message ?: t.javaClass.simpleName}")
+            android.util.Log.e("SilksongLauncher.Cloud", "pull flow failed ($source)", t)
+            return true
+        }
+    }
+
+    // ── Cloud save: push (Phase 1d) ────────────────────────────────────
+
+    private fun onPushClicked() {
+        val depot = DepotLocation.resolve(this)
+        if (GogCloud.isGogDepot(depot)) {
+            if (!GogAuth.isSignedIn(this)) {
+                LauncherLog.log("Push: GOG depot, but not signed in to GOG")
+                return
+            }
+            runCloudJob(spinPush, btnPush, R.string.action_push_saves_busy) {
+                gogPushFlow(depot)
+            }
+            return
+        }
+        val c = creds
+        if (c == null) {
+            LauncherLog.log("Push: not logged in")
+            return
+        }
+        runCloudJob(spinPush, btnPush, R.string.action_push_saves_busy) { pushFlow(c) }
+    }
+
+    /**
+     * Settings → auto-push, triggered from [onResume] when we just
+     * came back from the game. Same execution path as the manual
+     * Push button: a conflict prompt still appears if any local
+     * file is older than the cloud copy.
+     */
+    private fun maybeAutoPush() {
+        maybeGogAutoPush()
+        val c = creds ?: return
+        if (!settings.autoPush) return
+        LauncherLog.log("Auto-push: starting (returned from game, settings enabled)")
+        runCloudJob(spinPush, btnPush, R.string.action_push_saves_busy) { pushFlow(c) }
+    }
+
+    private suspend fun pushFlow(c: TokenStore.Credentials) {
+        try {
+            LauncherLog.log("Analyzing local vs cloud saves…")
+            val analysis = CloudSync.analyzePush(this@LauncherActivity, c)
+
+            // Proceed when there's anything to do — uploads, conflicts,
+            // OR cloud orphans to prune. Without the toDelete check we
+            // bail out whenever nothing is queued for upload, so a
+            // "delete-only" push (local pruned a rotated userN.dat.bakM
+            // backup that cloud still holds, with no newer file to send)
+            // would skip pushItems/toDelete entirely and leak the orphan.
+            if (analysis.toUpload.isEmpty() &&
+                analysis.conflicts.isEmpty() &&
+                analysis.toDelete.isEmpty()
+            ) {
+                LauncherLog.log("Push: nothing to do (all ${analysis.skipped.size} local file(s) already match cloud, no orphans)")
+                return
+            }
+
+            if (analysis.hasConflicts) {
+                when (confirmConflictResolution(analysis.conflicts.map { it.localFile.name }, newerSide = "cloud")) {
+                    ConflictChoice.KEEP_REMOTE -> {
+                        LauncherLog.log("Conflict: keep remote — pulling cloud saves over local")
+                        pullCloudOverLocal(c)
+                        return
+                    }
+                    ConflictChoice.CANCEL -> {
+                        LauncherLog.log("Push cancelled by user (cloud is newer for ${analysis.conflicts.size} file(s))")
+                        return
+                    }
+                    ConflictChoice.KEEP_LOCAL -> {
+                        // Fall through: upload EVERYTHING (safe + conflicts),
+                        // clobbering the newer cloud copies with local.
+                        LauncherLog.log("Conflict: keep local — overwriting cloud with local")
+                    }
+                }
+                CloudSync.pushItems(c, analysis.all, toDelete = analysis.toDelete).collect { }
+            } else {
+                CloudSync.pushItems(c, analysis.toUpload, toDelete = analysis.toDelete).collect { }
+            }
+        } catch (t: Throwable) {
+            LauncherLog.log("Push failed: ${t.message ?: t.javaClass.simpleName}")
+            android.util.Log.e("SilksongLauncher.Cloud", "push flow failed", t)
+        }
+    }
+
+    private enum class ConflictChoice { KEEP_LOCAL, KEEP_REMOTE, CANCEL }
+
+    /**
+     * Conflict resolver shown when local and cloud have diverged since
+     * the last sync (one side is strictly newer than the other). Offers
+     * a clear three-way choice instead of an ambiguous "overwrite?":
+     *
+     *   Keep local  → upload this device's saves, replacing the cloud.
+     *   Keep remote → download the cloud saves, replacing this device.
+     *   Cancel      → do nothing.
+     *
+     * Both directions are all-or-nothing — the winning side replaces the
+     * other for the whole save set, never a per-slot mix. [newerSide] is
+     * context for the message only ("the cloud copy is newer", etc.); the
+     * choice itself is symmetric regardless of which button (Push or
+     * Pull) opened the flow.
+     */
+    private suspend fun confirmConflictResolution(
+        conflictFiles: List<String>,
+        newerSide: String,
+    ): ConflictChoice = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+        fun finish(choice: ConflictChoice) {
+            if (cont.isActive) cont.resumeWith(Result.success(choice))
+        }
+        val count = conflictFiles.size
+        val msg = buildString {
+            append("Your device and the cloud have both changed since the last sync ")
+            append("(the $newerSide copy is newer).\n\n")
+            append("Conflicting file(s):\n")
+            for (name in conflictFiles.take(8)) append("• ").append(name).append('\n')
+            if (count > 8) append("…and ").append(count - 8).append(" more\n")
+            append("\nKeep local: upload this device's saves, replacing the cloud copy.\n")
+            append("Keep remote: download the cloud saves, replacing this device's copy.")
+        }
+        android.app.AlertDialog.Builder(this@LauncherActivity)
+            .setTitle("Save conflict")
+            .setMessage(msg)
+            .setPositiveButton("Keep local") { _, _ -> finish(ConflictChoice.KEEP_LOCAL) }
+            .setNegativeButton("Keep remote") { _, _ -> finish(ConflictChoice.KEEP_REMOTE) }
+            .setNeutralButton("Cancel") { _, _ -> finish(ConflictChoice.CANCEL) }
+            .setOnCancelListener { finish(ConflictChoice.CANCEL) }
+            .show()
+    }
+
+    /**
+     * Forced full pull (no prompt): the user chose "keep remote", so
+     * download the entire cloud set, clobbering local — including files
+     * where local was newer. Re-analyses from scratch because the
+     * originating flow may have been a push, which has no pull picture.
+     */
+    private suspend fun pullCloudOverLocal(c: TokenStore.Credentials) {
+        val analysis = CloudSync.analyzePull(this@LauncherActivity, c)
+        val items = analysis.toDownload + analysis.conflicts
+        if (items.isEmpty()) {
+            LauncherLog.log("Keep remote: nothing on cloud to pull")
+            return
+        }
+        CloudSync.pullItems(this@LauncherActivity, c, items).collect { }
+    }
+
+    /**
+     * Forced full push (no prompt): the user chose "keep local", so
+     * upload the entire local set, clobbering cloud — including files
+     * where cloud was newer. Re-analyses from scratch because the
+     * originating flow may have been a pull, which has no push picture.
+     */
+    private suspend fun pushLocalOverCloud(c: TokenStore.Credentials) {
+        val analysis = CloudSync.analyzePush(this@LauncherActivity, c)
+        if (analysis.all.isEmpty() && analysis.toDelete.isEmpty()) {
+            LauncherLog.log("Keep local: nothing local to push")
+            return
+        }
+        CloudSync.pushItems(c, analysis.all, toDelete = analysis.toDelete).collect { }
+    }
+
+    // ── Settings ───────────────────────────────────────────────────────
+
+    private fun onSettingsClicked() {
+        startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    // ── Cloud-job scheduling ───────────────────────────────────────────
+
+    /**
+     * Schedules [block] as the sole in-flight cloud job. If one is
+     * already running we no-op (and log) — overlapping logins on the
+     * same Steam account either race for the same CM session or
+     * trip Steam's "another client signed in" guard. We also
+     * disable the action buttons (Pull, Push, AND Launch) while a
+     * job runs so the UI matches the underlying state — in
+     * particular, auto-pull at startup needs to finish before the
+     * user can launch the game, or the player gets dropped into a
+     * still-stale local save.
+     */
+    /**
+     * Runs one cloud operation, with the arrow on its button replaced by a
+     * spinner for the duration.
+     *
+     * Both operations funnel through here, so the spinner has to be told which
+     * button it belongs to. The label stays put and only the arrow is swapped:
+     * a button whose text changes to "Downloading..." moves its own edges
+     * about, and the pair is sized to sit on one row.
+     */
+    private fun runCloudJob(
+        spinner: ProgressBar? = null,
+        button: Button? = null,
+        busyLabel: Int = 0,
+        block: suspend () -> Unit,
+    ) {
+        if (cloudJob?.isActive == true) {
+            LauncherLog.log("Cloud op already running — skipping")
+            return
+        }
+        btnPull.isEnabled = false
+        btnPush.isEnabled = false
+        btnLaunch.isEnabled = false
+        spinner?.visibility = View.VISIBLE
+        if (busyLabel != 0) button?.text = getString(busyLabel)
+        cloudJob = uiScope.launch {
+            try {
+                block()
+            } finally {
+                spinner?.visibility = View.GONE
+                // Both, unconditionally: cheaper than remembering which one
+                // was changed, and correct if a future caller changes both.
+                btnPull.text = getString(R.string.action_pull_saves)
+                btnPush.text = getString(R.string.action_push_saves)
+                btnLaunch.isEnabled = true
+                if (creds != null) {
+                    btnPull.isEnabled = true
+                    btnPush.isEnabled = true
+                }
+            }
+        }
+    }
+
+    // ── Launch the game ────────────────────────────────────────────────
+
+    private val buildSignature: String by lazy { BuildInstallation.signature(assets) }
+
+    private fun onLaunchClicked() {
+        if (!ensureBuildReady()) return
+        // Before anything else, because it is the one thing here that changes
+        // what the player is about to run rather than what it will read.
+        if (modsNeedBuilding()) {
+            askAboutMods()
+            return
+        }
+        continueLaunch()
+    }
+
+    /**
+     * Whether the mods folder has moved on from the build that exists.
+     *
+     * Only the folder's contents, never the switches: turning a mod on or off
+     * is applied at startup by the gate the weaver wove around it, so it is
+     * already true of the build sitting on disk. Asking about that would be
+     * offering a twenty-minute rebuild for something that has already
+     * happened.
+     */
+    private fun modsNeedBuilding(): Boolean = try {
+        val out = Il2cppConverter.rootFor(this)
+        Mods.isStale(Mods.dir(this), out, assets)
+    } catch (t: Throwable) {
+        // A folder that cannot be read is not a reason to refuse to play.
+        LauncherLog.log("Could not check the mods folder: $t")
+        false
+    }
+
+    /**
+     * The offer, not the decision.
+     *
+     * "No" launches: a build is twenty minutes and somebody who has just sat
+     * down to play has every right to leave a newly dropped mod until later.
+     * The mod is simply not in the game until they say yes, which is what the
+     * dialog says rather than implies.
+     */
+    private fun askAboutMods() {
+        val mods = Mods.dir(this)
+        val found = try { Mods.all(mods).size } catch (t: Throwable) { 0 }
+        val what = if (found == 1) "A mod has" else "Mods have"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("New mods detected")
+            .setMessage(
+                "$what been added, replaced or removed since the game was last built.\n\n" +
+                    "Mods are compiled into the game, so applying the change means rebuilding. " +
+                    "That takes several minutes — less than the first build, because only what " +
+                    "actually changed is compiled again.\n\n" +
+                    "Rebuild now, or play the build you already have?",
+            )
+            .setPositiveButton("Rebuild") { _, _ ->
+                startActivity(
+                    Intent(this, SetupActivity::class.java)
+                        .putExtra(SetupActivity.EXTRA_REBUILD, true),
+                )
+                finish()
+            }
+            .setNegativeButton("Play anyway") { _, _ -> continueLaunch() }
+            .setCancelable(true)
+            .show()
+    }
+
+    /**
+     * Launch button handler. Steam-style: if auto-pull is on and we're
+     * logged in, sync the latest cloud saves DOWN first (resolving any
+     * conflict via the dialog), then launch — so the player always
+     * starts on the freshest save. Cancelling the conflict aborts the
+     * launch. With auto-pull off or not logged in, we launch straight
+     * away.
+     */
+    private fun continueLaunch() {
+        // A GOG depot syncs against GOG's cloud, never Steam's, and both
+        // cannot be true at once: the depot points at exactly one store.
+        if (GogCloud.gogDepotPresent(this) && GogAuth.isSignedIn(this) && settings.gogAutoPull) {
+            val depot = DepotLocation.resolve(this)
+            runCloudJob(spinPull, btnPull, R.string.action_pull_saves_busy) {
+                if (gogPullFlow(depot, "pre-launch")) launchGame()
+                else LauncherLog.log("Launch aborted — unresolved GOG save conflict")
+            }
+            return
+        }
+        val c = creds
+        if (c == null || !settings.autoPull) {
+            launchGame()
+            return
+        }
+        runCloudJob(spinPull, btnPull, R.string.action_pull_saves_busy) {
+            LauncherLog.log("Pre-launch sync: pulling latest cloud saves…")
+            if (pullFlow(c, source = "pre-launch")) {
+                launchGame()
+            } else {
+                LauncherLog.log("Launch aborted — unresolved save conflict")
+            }
+        }
+    }
+
+    /**
+     * The GOG mirror of [pullFlow]: analyze local vs bucket, resolve any
+     * conflict through the same three-way dialog the Steam side uses, then
+     * apply. Returns whether the launch may proceed.
+     */
+    /**
+     * The GOG mirror of [pushFlow]: analyze with the user's explicit push
+     * intent — newer-cloud files come back as conflicts for the dialog, and
+     * applying with keep-local force-uploads the conflicting set.
+     */
+    private suspend fun gogPushFlow(depot: File?) {
+        try {
+            val tokens = GogAuth.loadTokens(this) ?: return
+            LauncherLog.log("GOG (manual push): analyzing local vs bucket…")
+            val plan = GogSync.analyze(this, depot, tokens)
+            if (plan == null || (plan.upload.isEmpty() && plan.conflictFiles.isEmpty())) {
+                LauncherLog.log("GOG push: nothing to upload")
+                return
+            }
+            var resolution: GogSync.Choice? = GogSync.Choice.KEEP_LOCAL
+            if (plan.conflictFiles.isNotEmpty()) {
+                when (confirmConflictResolution(plan.conflictFiles, newerSide = "phone")) {
+                    ConflictChoice.KEEP_LOCAL -> resolution = GogSync.Choice.KEEP_LOCAL
+                    ConflictChoice.KEEP_REMOTE -> resolution = GogSync.Choice.KEEP_CLOUD
+                    ConflictChoice.CANCEL -> resolution = GogSync.Choice.CANCEL
+                }
+                if (resolution == GogSync.Choice.CANCEL) return
+            }
+            val uploadSet = if (resolution == GogSync.Choice.KEEP_CLOUD) plan.upload else plan.upload + plan.conflictFiles
+            if (uploadSet.isEmpty()) return
+            GogSync.apply(this, depot, tokens,
+                GogSync.Plan(uploadSet, plan.download, plan.conflictFiles, "push"),
+                resolution)
+        } catch (t: Throwable) {
+            LauncherLog.log("GOG push failed: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun gogPullFlow(depot: File?, source: String, mode: String = "sync"): Boolean {
+        try {
+            val tokens = GogAuth.loadTokens(this)
+            if (tokens == null || depot == null) return true
+            LauncherLog.log("GOG ($source pull): analyzing cloud vs local saves…")
+            val plan = GogSync.analyze(this, depot, tokens, mode = "pull") ?: return true
+            var choice: GogSync.Choice? = null
+            if (plan.conflictFiles.isNotEmpty()) {
+                val steamChoice = confirmConflictResolution(
+                    plan.conflictFiles, newerSide = "phone")
+                choice = when (steamChoice) {
+                    ConflictChoice.KEEP_LOCAL -> GogSync.Choice.KEEP_LOCAL
+                    ConflictChoice.KEEP_REMOTE -> GogSync.Choice.KEEP_CLOUD
+                    ConflictChoice.CANCEL -> GogSync.Choice.CANCEL
+                }
+                if (choice == GogSync.Choice.CANCEL) return false
+            }
+            GogSync.apply(this, depot, tokens, plan, choice)
+            return true
+        } catch (t: Throwable) {
+            LauncherLog.log("GOG pull failed: ${t.message ?: t.javaClass.simpleName}")
+            return true
+        }
+    }
+
+    /**
+     * The GOG mirror of [maybeAutoPush]: same trigger (focus regained
+     * after the game), same conflict dialog, and the same refusal to
+     * delete anything implicitly.
+     */
+    private fun maybeGogAutoPush() {
+        if (!settings.gogAutoPush || !GogAuth.isSignedIn(this)) return
+        if (!GogCloud.gogDepotPresent(this)) return
+        val depot = DepotLocation.resolve(this)
+        runCloudJob(spinPush, btnPush, R.string.action_push_saves_busy) {
+            try {
+                val tokens = GogAuth.loadTokens(this@LauncherActivity)
+                if (tokens == null || depot == null) return@runCloudJob
+                LauncherLog.log("GOG auto-push: analyzing local vs bucket…")
+                val plan = GogSync.analyze(this@LauncherActivity, depot, tokens) ?: return@runCloudJob
+                var choice: GogSync.Choice? = null
+                if (plan.conflictFiles.isNotEmpty()) {
+                    val steamChoice = confirmConflictResolution(
+                        plan.conflictFiles, newerSide = "phone")
+                    choice = when (steamChoice) {
+                        ConflictChoice.KEEP_LOCAL -> GogSync.Choice.KEEP_LOCAL
+                        ConflictChoice.KEEP_REMOTE -> GogSync.Choice.KEEP_CLOUD
+                        ConflictChoice.CANCEL -> GogSync.Choice.CANCEL
+                    }
+                    if (choice == GogSync.Choice.CANCEL) return@runCloudJob
+                }
+                GogSync.apply(this@LauncherActivity, depot, tokens, plan, choice)
+            } catch (t: Throwable) {
+                LauncherLog.log("GOG push failed: ${t.message ?: t.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private fun launchGame() {
+        // The content is not inside the app: it is the depot's own bundle
+        // tree, read through <files>/aa every time the game runs, and the
+        // catalog can point nowhere else. So a depot that has been deleted or
+        // moved is checked for here rather than being discovered by the engine
+        // as an empty world, and the link is remade in case it moved.
+        val depot = DepotLocation.resolve(this)?.takeIf { PlayerImage.depotData(it) != null }
+        if (depot == null) {
+            LauncherLog.log("Launch aborted: the game's files are not on this device")
+            missingGameFiles()
+            return
+        }
+        runCatching { DepotLocation.relink(this, depot) }
+            .onFailure { LauncherLog.log("could not relink the content", it) }
+
+        // The game's process has to be able to load its own activity, and
+        // GameActivity's superclass comes from a dex this app builds on the
+        // device rather than from anything in the APK. When that dex is not
+        // loadable the process dies before onCreate -- before the game has
+        // started any of its own logging -- so the failure looks like the
+        // game "just not opening" and leaves nothing behind. Asked here,
+        // where it can still be fixed, rather than discovered over there,
+        // where it cannot. See UnityDex.repair and issue #24.
+        if (!UnityDex.playerClassesUsable(this)) {
+            repairPlayerClasses()
+            return
+        }
+        startGameActivity()
+    }
+
+    /**
+     * Starts the game, with the checks already made.
+     *
+     * Separate from [launchGame] on purpose, and the separation is load
+     * bearing: the repair below finishes by starting the game, and if it went
+     * back through the check it would find it still failing -- a process that
+     * grafted a bad jar at startup stays that way -- and repair again, and
+     * again. That is not hypothetical; it is what the first version of this
+     * did, several times a second, deleting and re-dexing the jar each time.
+     */
+    private fun startGameActivity() {
+        // Also covers returns from asynchronous cloud sync and dex repair.
+        if (!ensureBuildReady()) return
+        try {
+            LauncherLog.log("Launching $UNITY_ACTIVITY_CLASS")
+            // No FLAG_ACTIVITY_NEW_TASK / CLEAR_TASK and no finish()
+            // here — we want Unity's activity ON TOP of ours in the
+            // same task so the system back stack returns to us on
+            // exit. Our `:launcher` process keeps us alive even
+            // when Unity calls System.exit(0) on quit, so the
+            // returning activity transition is just an OS-driven
+            // resume of the still-living launcher.
+            val intent = Intent().apply {
+                setClassName(packageName, UNITY_ACTIVITY_CLASS)
+            }
+            // Written here rather than when the user changes a setting: this
+            // is the moment the game will read them, so it is the moment they
+            // cannot be stale.
+            settings.exportForGame(this)
+            // Same reason, and the more important one: this is the last moment
+            // before the engine owns the save directory. See SaveDir -- the
+            // game promotes a stranded save temp over the real save without
+            // saying so, and clearing them is only possible from out here.
+            SaveDir.prepare(this)
+            returningFromGame = true
+            startActivity(intent)
+        } catch (t: Throwable) {
+            returningFromGame = false
+            LauncherLog.log("Failed to launch game: ${t.message}")
+        }
+    }
+
+    private fun ensureBuildReady(): Boolean {
+        val ready = try {
+            BuildInstallation.isReady(File(filesDir, "pkg"), buildSignature)
+        } catch (e: java.io.IOException) {
+            LauncherLog.log("Could not check the installed build", e)
+            false
+        }
+        if (ready) return true
+        LauncherLog.log("Launch held: the game installation is incomplete or out of date")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("The game needs rebuilding")
+            .setMessage(
+                "A previous build did not finish, or the installed game needs updating for this app.\n\n" +
+                    "Resume the build before playing. Completed conversion and compilation work " +
+                    "will be reused, and your game files and saves are kept.",
+            )
+            .setPositiveButton("Resume build") { _, _ ->
+                startActivity(
+                    Intent(this, SetupActivity::class.java)
+                        .putExtra(SetupActivity.EXTRA_REBUILD, true),
+                )
+                finish()
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+        return false
+    }
+
+    /**
+     * Rebuilds the player classes, then launches -- or says why it cannot.
+     *
+     * A second or two, off the main thread because it dexes, with the launch
+     * button held so it cannot be pressed into a second attempt on top of
+     * this one. Silent when it works: this is a repair the user did not ask
+     * for and does not need to know the details of, and the log has them.
+     */
+    private fun repairPlayerClasses() {
+        if (repairAttempted) {
+            // Once per visit to this screen. Dexing the same jar a third time
+            // will not help, and a repair allowed to retry itself is a loop
+            // waiting for a reason to happen.
+            playerClassesBroken("The player classes could not be made loadable.")
+            return
+        }
+        repairAttempted = true
+        LauncherLog.log("Launch held: the player classes are not loadable")
+        btnLaunch.isEnabled = false
+        uiScope.launch {
+            val problem = withContext(Dispatchers.IO) {
+                UnityDex.repair(this@LauncherActivity)
+            }
+            btnLaunch.isEnabled = true
+            if (problem == null) {
+                // Straight to the start, NOT back through launchGame: see
+                // startGameActivity for why re-checking here loops.
+                startGameActivity()
+            } else {
+                playerClassesBroken(problem)
+            }
+        }
+    }
+
+    /**
+     * The game cannot be started and rebuilding its classes did not help.
+     *
+     * A dialog rather than a log line for the same reason as
+     * [missingGameFiles]: from the outside this is the app declining to open
+     * the game with no explanation. Offering the reset is offering the thing
+     * that used to be the only known cure -- and saying what it costs, since
+     * the depot and the saves are not part of it.
+     */
+    private fun playerClassesBroken(problem: String) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("The game cannot be started")
+            .setMessage(
+                "$problem\n\n" +
+                    "The engine's Java classes are built on this device, and the game " +
+                    "cannot open without them. Resetting the build will make them again. " +
+                    "The game's files and your saves are not affected.",
+            )
+            .setPositiveButton("Reset the build") { _, _ ->
+                startActivity(
+                    Intent(this, SetupActivity::class.java)
+                        .putExtra(SetupActivity.EXTRA_RESET, true),
+                )
+                finish()
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /**
+     * The depot has gone since the game was built.
+     *
+     * Worth a dialog rather than a log line, because from the outside this
+     * looks like the app breaking on its own. The content was never copied
+     * into the app -- it is several gigabytes and stays where the user put it
+     * -- so deleting or moving that folder takes the game with it, and nothing
+     * about the built engine says so.
+     *
+     * Nothing else is lost, and saying that matters: the toolchain, the
+     * conversion and the compiled engine are all still there, so restoring the
+     * folder or picking it again is minutes rather than the half hour the
+     * first build took.
+     */
+    private fun missingGameFiles() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("The game's files are missing")
+            .setMessage(
+                "Silksong reads its content straight out of the folder you supplied. " +
+                    "That folder is no longer there, so the game cannot start.\n\n" +
+                    "Put it back, or point the app at it again. Everything else that was " +
+                    "built is still here, so it will not have to be done again.",
+            )
+            .setPositiveButton("Find the files") { _, _ ->
+                startActivity(Intent(this, SetupActivity::class.java))
+                finish()
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /**
+     * GOG sign-in, on the main screen beside Steam's. The depot decides
+     * everything: a GOG-owned build carries the goggame file that names the
+     * save bucket; a Steam or manually-copied depot does not, and the button
+     * only says so in the log. Signed-in state lives in the launcher
+     * process; a fresh result refreshes the label.
+     */
+    private fun onGogLoginClicked() {
+        val depot = DepotLocation.resolve(this)
+        if (!GogCloud.isGogDepot(depot)) {
+            LauncherLog.log("GOG: the selected depot is not a GOG build; no cloud saves to sync")
+            return
+        }
+        if (GogAuth.isSignedIn(this)) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle(R.string.settings_gog_sign_out)
+                .setMessage("Cloud saves stay in GOG storage; only this device signs out.")
+                .setPositiveButton("Sign out") { _, _ ->
+                    GogAuth.signOut(this)
+                    refreshGogLoginLabel()
+                    LauncherLog.log("GOG: signed out")
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val gogId = GogCloud.gogId(depot)
+        if (gogId.isEmpty()) {
+            LauncherLog.log("GOG: depot has no goggame id; cannot resolve the cloud bucket")
+            return
+        }
+        startActivityForResult(
+            Intent(this, GogLoginActivity::class.java)
+                .putExtra(GogLoginActivity.EXTRA_GOG_ID, gogId),
+            7123)
+    }
+
+    private fun refreshGogLoginLabel() {
+        btnGogLogin.text = getString(
+            if (GogAuth.isSignedIn(this)) R.string.settings_gog_sign_out else R.string.settings_gog_sign_in)
+    }
+}

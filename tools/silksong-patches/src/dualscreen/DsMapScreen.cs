@@ -1,0 +1,741 @@
+// DsMapScreen — the map tab.
+//
+// Two states, and the second one matters as much as the first:
+//
+//   * The player owns a map of the zone they are in: draw it, centred on them,
+//     from DsMapView's render texture.
+//   * They do not: draw the game's own No-Map symbol, and do not touch the
+//     game's map state at all.
+//
+// The symbol is READ, not cloned. V1 built copies of the No_Map_symbol renderers
+// on its private layer and forced their alpha back to 1 every frame, because the
+// quick-map FSM's FadeGroup fades the originals and it needed a renderer it
+// owned. We want the Sprite, not the renderer: take it off the game's
+// SpriteRenderer once and draw it as an ordinary uGUI Image. After the read,
+// nothing of the game's is involved, so there is nothing left to fight.
+//
+// The sprite cannot be named ahead of time -- it is a Sprite reference on one of
+// the game's prefabs, not a named constant -- so it is found by object name,
+// with a scan as a fallback, and a null degrades to a line of text rather than
+// to a blank panel.
+//
+// FULL MAP is not a button yet. The framing it needs already exists
+// (DsMapView.Frame.World) and is reachable with `map_frame=world` in the
+// DsConfig file, so the maths can be checked on the device before a control is
+// drawn for it. That ordering is deliberate: the button is five lines once the
+// framing is known to be right, and misleading once it is known to be wrong.
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using GlobalEnums;
+using TmpText = TMProOld.TextMeshProUGUI;
+using TmpAlign = TMProOld.TextAlignmentOptions;
+
+public class DsMapScreen : IDsScreen, IDsActionBar, IDsHeaderTitle, IDsTabStrip
+{
+    enum State { Idle, NoMap, Map }
+
+    const float HeaderH = 72f;
+    /// <summary>Air under the map, above the tab strip's own.</summary>
+    static float MapBottomPad => Mathf.Clamp(DsConfig.Int("map_bottom_pad_px", 4), 0, 60);
+    const float SymbolSize = 260f;
+    // How long the last rendered frame is held when the game drops out of
+    // gameplay. Scene transitions do that for a few frames, and flashing the
+    // idle panel in the middle of walking through a door is the flicker.
+    const float HoldSeconds = 2.5f;
+
+    DsMapView _view;
+    RectTransform _host;
+    RectTransform _mapPanel, _noMapBox;
+    RawImage _raw;
+    Image _symbol;
+    TmpText _noMapText;
+
+    Rect _mapRect;              // in panel layout space, for hit-testing
+    State _state = State.Idle;
+    bool _stateApplied;
+    bool _buttonsShown;
+    // The area's name, shown by the shell in the header.
+    string _zoneName = "";
+    // Marker mode: which pin is chosen, whether the bin is, and the types the
+    // strip last offered (so a strip index maps back to a marker type).
+    bool _markerMode, _erasing;
+    int _markerPick = -1;
+    readonly List<int> _stripTypes = new List<int>();
+    float _holdUntil;
+    // When the player last did something to the map, for the fade of RESET and
+    // the zoom slider. Unscaled, because the game holds timeScale at zero while
+    // its own menu -- and so this panel -- is open.
+    float _lastTouch;
+    /// <summary>How long RESET and the zoom slider stay solid after the last touch, then fade over.</summary>
+    const float ControlsHold = 3f;
+    const float ControlsFade = 0.6f;
+    const float SliderInsetX = 10f;
+    const float SliderInsetY = 12f;
+    DsZoomSlider _slider;
+    Image _sliderTrack, _sliderThumb;
+    bool _sliderGesture;
+    MapZone _zone = MapZone.NONE;
+    float _nextSymbolHunt;
+    float _nextHeader;
+
+    public string Id { get { return "map"; } }
+    public string Title { get { return "MAP"; } }
+    public bool Available { get { return DsGameData.InGame; } }
+
+    // ── build ───────────────────────────────────────────────────────────────
+
+    public void Build(RectTransform host)
+    {
+        _host = host;
+
+        var layout = DsLayout.Current;
+        float panelW = layout.Width;
+        float bodyH = layout.Body.height;
+
+        float x = DsTheme.Pad;
+        // The zone name used to sit here, in the body, costing the map a band
+        // across its top. It is in the HEADER now -- above the divider, where
+        // the designs put it -- so the map takes the whole body back.
+        //
+        // And only a hairline at the bottom rather than the panel's usual
+        // padding: the tab strip below already carries its own air above the
+        // icons, so a full pad here stacked two margins into one wide black
+        // band between the map and the tabs.
+        float y = DsTheme.Pad;
+        float w = panelW - DsTheme.Pad * 2f;
+        float h = bodyH - DsTheme.Pad - MapBottomPad;
+
+        // Kept in panel space too, because gestures arrive in panel pixels and
+        // converting the rect once is cheaper and clearer than converting every
+        // drag.
+        _mapRect = layout.InBody(new Rect(x, y, w, h));
+
+        // FULL MAP and RESET live in the HEADER now, not over the map -- see
+        // DsActions -- and so does the zone name, which the shell asks for
+        // through IDsHeaderTitle.
+
+        // No border. The map is a picture with its own edges; a frame around it
+        // read as a second, competing one.
+        _mapPanel = DsWidgets.Box(host, "map", DsTheme.Ground).rectTransform;
+        DsWidgets.Place(_mapPanel, x, y, w, h);
+
+        var rawRt = DsWidgets.Rect(_mapPanel, "render");
+        DsWidgets.Stretch(rawRt);
+        _raw = rawRt.gameObject.AddComponent<RawImage>();
+        _raw.raycastTarget = false;
+        _raw.color = Color.white;
+
+        _view = new DsMapView(_mapPanel);
+        _view.Mode = DsConfig.Str("map_frame", "area") == "world"
+                   ? DsMapView.Frame.World : DsMapView.Frame.Area;
+        _view.Build(Mathf.RoundToInt(w), Mathf.RoundToInt(h));
+        _raw.texture = _view.Texture;
+
+        // Anything that is not a map is the same picture: the game's own No-Map
+        // symbol. "Loading…" and "Main menu" were accurate and useless -- the
+        // panel is a map, and the honest thing for it to say when it has no map
+        // is the symbol the game already uses for exactly that.
+        _noMapBox = DsWidgets.Rect(_mapPanel, "no-map");
+        DsWidgets.Stretch(_noMapBox);
+
+        _symbol = DsWidgets.Icon(_noMapBox, "symbol", null, Color.white);
+
+        // No caption. The game's own No-Map symbol is the caption -- a player
+        // who recognises it does not need telling, and one who does not will not
+        // be helped by a line of text under it either. It only comes back if the
+        // sprite cannot be found at all, below.
+        _noMapText = DsWidgets.Label(_noMapBox, "no-map-text", "", DsTheme.RowSize,
+                                     DsTheme.InkDim, TmpAlign.Center);
+        if (_noMapText != null)
+            DsWidgets.Place(_noMapText.rectTransform, 0f, h * 0.5f + SymbolSize * 0.55f, w, 60f);
+
+        // Last, so it lies over the map and the No-Map symbol alike: the map is
+        // a picture with hard edges on all four sides, and it ends against the
+        // panel's black in a straight cut. A narrow fade takes the cut off
+        // every edge and corner without dimming anything the player is reading
+        // -- see DsTheme.EdgeFade for why it is sliced and why the ramp is
+        // cubed rather than linear.
+        var fade = DsWidgets.Icon(_mapPanel, "edge-fade", DsTheme.EdgeFade, Color.white);
+        fade.type = Image.Type.Sliced;
+        fade.useSpriteMesh = false;
+        fade.preserveAspect = false;
+        fade.raycastTarget = false;
+        DsWidgets.Stretch(fade.rectTransform);
+
+        BuildSlider(w, h);
+
+        Apply(State.Idle, force: true);
+    }
+
+    void BuildSlider(float w, float h)
+    {
+        Sprite track = DsSliderArt.Track, thumb = DsSliderArt.Thumb;
+        if (track == null || thumb == null) return;
+
+        _slider = new DsZoomSlider(
+            new Rect(w - SliderInsetX - DsZoomSlider.TrackWidth, SliderInsetY,
+                     DsZoomSlider.TrackWidth, h - SliderInsetY * 2f),
+            DsMapView.MinZoom, DsMapView.MaxZoom);
+
+        _sliderTrack = DsWidgets.Icon(_mapPanel, "zoom-track", track, Color.white);
+        _sliderTrack.type = Image.Type.Sliced;
+        _sliderTrack.useSpriteMesh = false;
+        _sliderTrack.preserveAspect = false;
+        DsWidgets.Place(_sliderTrack.rectTransform, _slider.Track);
+
+        _sliderThumb = DsWidgets.Icon(_mapPanel, "zoom-thumb", thumb, Color.white);
+        _sliderThumb.useSpriteMesh = false;
+        _sliderThumb.preserveAspect = false;
+
+        PaintSlider();
+    }
+
+    public void OnShow()
+    {
+        _view.ResetPan();
+        _nextHeader = 0f;
+    }
+
+    public void OnHide()
+    {
+        _markerMode = false;
+        _sliderGesture = false;
+        if (_slider != null) _slider.Release();
+        // Stop rendering the moment the tab goes away. The content is left
+        // enabled deliberately: "zones active, display off" is the state the
+        // game itself sits in between maps, so there is nothing to restore and
+        // nothing that can be caught half-restored.
+        if (_view != null) _view.SetVisible(false);
+    }
+
+    // ── per frame ───────────────────────────────────────────────────────────
+
+    public void Tick(float dt)
+    {
+        State want;
+
+        if (!DsGameData.InGame || !_view.Poll())
+        {
+            want = State.Idle;
+        }
+        else
+        {
+            // Drive answers this rather than a pre-check, because only
+            // TryOpenQuickMap knows whether the zone has a map, and only it can
+            // take the previous zone's map down when it does not.
+            want = _view.Drive() ? State.Map : State.NoMap;
+            if (want == State.Map) _holdUntil = Time.unscaledTime + HoldSeconds;
+        }
+
+        // Hold the last frame through a scene transition.
+        //
+        // Walking through a door takes the game out of a gameplay scene for a
+        // few frames -- no hero, so DsGameData.InGame goes false -- and the map
+        // would drop to the idle panel and back. That is the flicker seen when
+        // travelling between zones. Freezing the cameras leaves the render
+        // texture holding its last good frame, so the panel simply stops
+        // updating for a moment instead of blinking.
+        //
+        // Idle only. A no-map zone is a real answer, arrived at while the game
+        // is perfectly alive, and holding the previous zone's map over it would
+        // be the very bug this is next to.
+        if (want == State.Idle && _state == State.Map && Time.unscaledTime < _holdUntil)
+        {
+            _view.SetVisible(false);
+            PaintSlider();
+            return;
+        }
+
+        Apply(want, force: false);
+        RefreshText();
+        PaintSlider();
+    }
+
+    void PaintSlider()
+    {
+        if (_slider == null) return;
+
+        if (_state != State.Map) _slider.Release();
+        else if (_slider.Held) _lastTouch = Time.unscaledTime;
+
+        float alpha = _state == State.Map ? ControlsAlpha() : 0f;
+        DsWidgets.SetActive(_sliderTrack, alpha > 0f);
+        DsWidgets.SetActive(_sliderThumb, alpha > 0f);
+        if (alpha <= 0f) return;
+
+        var ink = new Color(1f, 1f, 1f, alpha);
+        _sliderTrack.color = ink;
+        _sliderThumb.color = ink;
+        DsWidgets.Place(_sliderThumb.rectTransform, _slider.Thumb(_view.ZoomLevel));
+    }
+
+    void Apply(State s, bool force)
+    {
+        // Visibility is driven every tick rather than only on a change. OnHide
+        // switches the cameras off without changing the state, so a state-gated
+        // SetVisible would leave them off for good once the player tabbed away
+        // from the map and back -- an empty panel with nothing in the log.
+        if (_view != null) _view.SetVisible(s == State.Map);
+
+        if (!force && s == _state && _stateApplied) return;
+        _state = s;
+        _stateApplied = true;
+
+        DsWidgets.SetActive(_raw, s == State.Map);
+        // One picture for every not-a-map state, idle included.
+        DsWidgets.SetActive(_noMapBox, s != State.Map);
+
+        // The controls survive the No-Map state, because the full map is exactly
+        // what you want when you are standing somewhere you have no map of --
+        // and the game's own menu does not hide its map pane there either. They
+        // go only when there is no map anywhere to open, or no game at all.
+        _buttonsShown = s == State.Map || (s == State.NoMap && _view != null && _view.HasAnyMap);
+
+        // The texture handle can change if the rig is ever rebuilt; re-reading
+        // it here costs nothing and removes a way for the panel to go black.
+        if (s == State.Map && _raw != null && _view != null && _raw.texture != _view.Texture)
+            _raw.texture = _view.Texture;
+    }
+
+    void RefreshText()
+    {
+        if (Time.unscaledTime < _nextHeader) return;
+        _nextHeader = Time.unscaledTime + 0.5f;
+
+        if (_state == State.Idle)
+        {
+            // No zone to name, and the symbol says the rest.
+            _zoneName = "";
+            HuntSymbol();
+            return;
+        }
+
+        if (_state == State.NoMap)
+        {
+            // Nothing to title. The name comes from TryOpenQuickMap, which
+            // refuses for a zone with no map, so anything shown here would be
+            // the PREVIOUS area's name -- which is worse than a blank, because
+            // it is confidently wrong about where you are.
+            _zoneName = "";
+            _zone = MapZone.NONE;
+            HuntSymbol();
+            return;
+        }
+
+        // The full map is not an area, so it has no area name. Showing the zone
+        // Hornet happens to be standing in, over a view of the whole of
+        // Pharloom, labels the wrong thing.
+        if (_view.Mode == DsMapView.Frame.World)
+        {
+            _zoneName = "";
+            _zone = MapZone.NONE;      // force a refresh on the way back
+            return;
+        }
+
+        var zone = _view.CurrentZone;
+        if (zone != _zone || string.IsNullOrEmpty(_zoneName))
+        {
+            _zone = zone;
+            // TryOpenQuickMap hands back the name the game itself would print,
+            // including the per-zone NameOverride that lives on a private
+            // ZoneInfo and is unreachable from here. Fall back to the
+            // localisation sheet until the map has been opened once.
+            string named = _view.ZoneName;
+            if (string.IsNullOrEmpty(named)) named = ZoneName(zone);
+            _zoneName = named;
+        }
+
+        if (_state == State.NoMap) HuntSymbol();
+    }
+
+    /// <summary>
+    /// The game's own name for the zone, from its own localisation.
+    ///
+    /// GameMap.TryOpenQuickMap resolves it as Language.Get(zone, "Map Zones")
+    /// with the &lt;br&gt; stripped, so this matches what the player would see on
+    /// the quick map -- minus the per-zone NameOverride, which lives on a private
+    /// ZoneInfo and is not reachable from here.
+    /// </summary>
+    static string ZoneName(MapZone zone)
+    {
+        if (zone == MapZone.NONE) return "";
+        try
+        {
+            string s = TeamCherry.Localization.Language.Get(zone.ToString(), "Map Zones");
+            if (!string.IsNullOrEmpty(s)) return s.Replace("<br>", " ").Trim();
+        }
+        catch { }
+        // A readable fallback beats the raw enum: PATH_OF_BONE -> Path Of Bone.
+        return Pretty(zone.ToString());
+    }
+
+    static string Pretty(string raw)
+    {
+        var sb = new System.Text.StringBuilder(raw.Length);
+        bool startOfWord = true;
+        for (int i = 0; i < raw.Length; i++)
+        {
+            char c = raw[i];
+            if (c == '_') { sb.Append(' '); startOfWord = true; continue; }
+            sb.Append(startOfWord ? char.ToUpperInvariant(c) : char.ToLowerInvariant(c));
+            startOfWord = false;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Borrow the No-Map sprite from the game, retrying until the HUD exists.
+    ///
+    /// Two places have one under the same object name -- the quick map's, and the
+    /// inventory Map pane's -- so the direct path is tried first and a scan
+    /// catches whichever is loaded.
+    /// </summary>
+    void HuntSymbol()
+    {
+        if (_symbol == null || _symbol.sprite != null) return;
+        if (Time.unscaledTime < _nextSymbolHunt) return;
+        _nextSymbolHunt = Time.unscaledTime + 1f;
+
+        var sprite = FindNoMapSprite();
+        if (sprite == null)
+        {
+            // Only now is a caption worth having: with no symbol, an empty panel
+            // is indistinguishable from a bug.
+            if (_noMapText != null && _noMapText.text.Length == 0)
+                _noMapText.text = "No map of this area";
+            return;
+        }
+
+        DsWidgets.FitCentred(_symbol, sprite, SymbolSize, SymbolSize);
+        if (_noMapText != null) _noMapText.text = "";
+        Debug.Log("[DsMap] no-map symbol: '" + sprite.name + "'");
+    }
+
+    static Sprite FindNoMapSprite()
+    {
+        try
+        {
+            var gc = GameCameras.instance;
+            if (gc != null && gc.hudCamera != null)
+            {
+                var hud = gc.hudCamera.GetComponent<HUDCamera>();
+                if (hud != null && hud.GameplayChild != null)
+                {
+                    var t = hud.GameplayChild.transform.Find("Quick Map/No Map/No_Map_symbol");
+                    if (t != null)
+                    {
+                        var sr = t.GetComponent<SpriteRenderer>();
+                        if (sr != null && sr.sprite != null) return sr.sprite;
+                    }
+                }
+            }
+        }
+        catch { }
+
+        try
+        {
+            var all = Resources.FindObjectsOfTypeAll<SpriteRenderer>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                var sr = all[i];
+                if (sr == null || sr.sprite == null) continue;
+                if (sr.gameObject.name == "No_Map_symbol") return sr.sprite;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[DsMap] no-map sprite scan failed: " + e.Message);
+        }
+        return null;
+    }
+
+    // ── input ───────────────────────────────────────────────────────────────
+
+    public void OnGesture(DsGesture g)
+    {
+        if (_view == null) return;
+
+        Vector2 p = DsPresentation.ToLayout(g.Position);
+
+        if (_state != State.Map) return;
+
+        if (SliderGesture(g, p)) return;
+
+        // Any touch on the map counts as interaction, whether or not it moves
+        // anything: RESET and the zoom slider fade on a timer, and reaching for
+        // the map is exactly when the player wants them back. Taken before the
+        // marker-mode return below, so pinning a marker keeps them alive too.
+        if (_mapRect.Contains(p)) _lastTouch = Time.unscaledTime;
+
+        // Placing and removing happen on a tap; pan and zoom fall through below,
+        // which is what keeps the map usable while pinning.
+        if (_markerMode && g.Type == DsGestureType.Tap) { MarkerTap(p); return; }
+
+        switch (g.Type)
+        {
+            case DsGestureType.Drag:
+                if (_mapRect.Contains(p)) _view.Pan(g.Delta);
+                break;
+
+            case DsGestureType.Pinch:
+                if (_mapRect.Contains(p)) _view.Zoom(g.Scale);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Give the gesture to the zoom slider if the finger landed on it. True if
+    /// it did, the Tap that ends such a touch included, so that one never
+    /// places a pin.
+    ///
+    /// Only a slider already showing can be grabbed: while it is faded out, a
+    /// drag near the right edge pans the map like any other. A pinch always
+    /// goes to the map.
+    /// </summary>
+    bool SliderGesture(DsGesture g, Vector2 layoutPoint)
+    {
+        if (_slider == null) return false;
+
+        Vector2 local = layoutPoint - _mapRect.position;
+        if (g.Type == DsGestureType.Down)
+        {
+            _slider.Release();
+            _sliderGesture = ControlsAlpha() > 0f && _slider.Grab(local, _view.ZoomLevel);
+        }
+        else if (g.Type == DsGestureType.Pinch)
+        {
+            _slider.Release();
+            _sliderGesture = false;
+        }
+        if (!_sliderGesture) return false;
+
+        _lastTouch = Time.unscaledTime;
+        if (g.Type == DsGestureType.Drag && _slider.Held) _view.SetZoom(_slider.Drag(local));
+        else if (g.Type == DsGestureType.Up) _slider.Release();
+        return true;
+    }
+
+    // ── marker mode ─────────────────────────────────────────────────────────
+
+    static bool AnyMarkerUnlocked()
+    {
+        for (int i = 0; i < DsMarkers.TypeCount; i++)
+            if (DsMarkers.Unlocked(i)) return true;
+        return false;
+    }
+
+    void SetMarkerMode(bool on)
+    {
+        _markerMode = on;
+        if (!on) return;
+        // The whole of Pharloom, as the v3 notes ask: a pin is placed against
+        // somewhere you are not standing, so the area you happen to be in is
+        // the wrong frame to choose one on.
+        if (_view != null && _view.Mode != DsMapView.Frame.World)
+            _view.SetMode(DsMapView.Frame.World);
+        if (_markerPick < 0) _markerPick = FirstUnlockedMarker();
+    }
+
+    static int FirstUnlockedMarker()
+    {
+        for (int i = 0; i < DsMarkers.TypeCount; i++)
+            if (DsMarkers.Unlocked(i)) return i;
+        return -1;
+    }
+
+    public bool StripOverride { get { return _markerMode; } }
+
+    public void CollectStrip(List<DsStripItem> into)
+    {
+        _stripTypes.Clear();
+        for (int i = 0; i < DsMarkers.TypeCount; i++)
+        {
+            if (!DsMarkers.Unlocked(i)) continue;
+            int left = DsMarkers.Remaining(i);
+            into.Add(new DsStripItem
+            {
+                Icon = DsGameArt.MarkerIcon(i),
+                Badge = left.ToString(),
+                Selected = !_erasing && _markerPick == i,
+                Dim = left <= 0,
+            });
+            _stripTypes.Add(i);
+        }
+        // The bin last, as the design draws it: with it chosen, a tap on the
+        // map removes rather than places.
+        into.Add(new DsStripItem { Icon = DsTrashArt.Sprite, Selected = _erasing });
+    }
+
+    public void OnStripSelect(int index)
+    {
+        // The strip is rebuilt each frame in this same order, so the index maps
+        // back through the types that were actually offered.
+        if (index >= 0 && index < _stripTypes.Count)
+        {
+            _erasing = false;
+            _markerPick = _stripTypes[index];
+            return;
+        }
+        _erasing = true;      // the bin
+    }
+
+    /// <summary>
+    /// Place or remove a pin under a tap.
+    ///
+    /// Only on a TAP. The map stays pannable and zoomable in this mode, and
+    /// DsInput already tells a tap from a drag, so nothing has to be turned off
+    /// to keep both working.
+    /// </summary>
+    void MarkerTap(Vector2 layoutPoint)
+    {
+        if (_view == null || !_mapRect.Contains(layoutPoint)) return;
+
+        Vector2 uv = new Vector2(
+            (layoutPoint.x - _mapRect.x) / _mapRect.width,
+            // Viewport y counts up; layout counts down.
+            1f - (layoutPoint.y - _mapRect.y) / _mapRect.height);
+
+        // A pin already under the finger is removed whichever mode we are in:
+        // tapping one you can see and having a second appear on top of it is
+        // the more surprising behaviour. The bin then matters for saying "I am
+        // clearing, not placing" before the finger lands.
+        if (RemoveNear(uv)) { _view.RefreshMarkers(); return; }
+        if (_erasing || _markerPick < 0) return;
+
+        Vector2 local;
+        if (!_view.TryToMapLocal(uv, out local)) return;
+        if (DsMarkers.Place(_markerPick, local)) _view.RefreshMarkers();
+    }
+
+    bool RemoveNear(Vector2 uv)
+    {
+        const float grabPx = 44f;
+        float grabU = grabPx / Mathf.Max(1f, _mapRect.width);
+        float grabV = grabPx / Mathf.Max(1f, _mapRect.height);
+        float best = float.MaxValue;
+        int bestType = -1, bestIndex = -1;
+
+        for (int t = 0; t < DsMarkers.TypeCount; t++)
+        {
+            var list = DsMarkers.Placed(t);
+            if (list == null) continue;
+            for (int i = 0; i < list.Count; i++)
+            {
+                Vector2 at;
+                if (!_view.TryToViewport(list[i], out at)) continue;
+                float dx = (at.x - uv.x) / grabU, dy = (at.y - uv.y) / grabV;
+                float d = dx * dx + dy * dy;
+                if (d > 1f || d >= best) continue;
+                best = d; bestType = t; bestIndex = i;
+            }
+        }
+        return bestType >= 0 && DsMarkers.RemoveAt(bestType, bestIndex);
+    }
+
+    void ToggleMode()
+    {
+        var next = _view.Mode == DsMapView.Frame.Area
+                 ? DsMapView.Frame.World
+                 : DsMapView.Frame.Area;
+        _view.SetMode(next);
+    }
+
+    /// <summary>
+    /// The area's name, which the shell draws in the header.
+    ///
+    /// Empty on the full map and outside a map, where the shell falls back to
+    /// the tab's own name: "Choral Chambers" over a view of the whole of
+    /// Pharloom would be labelling the wrong thing.
+    /// </summary>
+    public string HeaderTitle
+    {
+        get { return _state == State.Map ? _zoneName : null; }
+    }
+
+    public void CollectActions(List<DsAction> into)
+    {
+        // Offered wherever they would do something, which is the same condition
+        // the buttons were drawn under before: a map to reframe, or at least a
+        // map somewhere to go back to.
+        if (_view == null || !_buttonsShown) return;
+
+        if (_markerMode)
+        {
+            into.Add(new DsAction("EXIT", () => SetMarkerMode(false)));
+            return;
+        }
+
+        into.Add(new DsAction(
+            _view.Mode == DsMapView.Frame.World ? "AREA MAP" : "FULL MAP",
+            ToggleMode));
+        // Only where there is a map to pin things to, and only once the player
+        // has actually found a pin to place.
+        if (_state == State.Map && AnyMarkerUnlocked())
+            into.Add(new DsAction("MARKERS", () => SetMarkerMode(true)));
+
+        // RESET is not like the two above. They change what the map IS -- which
+        // is always a thing you might want -- while this one only undoes a pan
+        // or a pinch, so it is offered only once there is something to undo,
+        // and at the BOTTOM of the panel rather than beside them.
+        //
+        // And then it FADES. Leaving the map parked somewhere deliberate is a
+        // normal thing to do -- reading a route, watching for a bench -- and a
+        // button sitting over the corner of the map for as long as you look at
+        // it is exactly what this panel is trying not to be. A few seconds
+        // after the last touch it goes; the next touch brings it back, which is
+        // the moment you might want it.
+        float alpha = ControlsAlpha();
+        if (alpha > 0f && _view.ViewMoved)
+            into.Add(new DsAction("RESET", ResetView, false,
+                                  DsActionPlace.Pane, alpha));
+    }
+
+    void ResetView()
+    {
+        _view.ResetView();
+        _lastTouch = 0f;
+    }
+
+    /// <summary>
+    /// How solid RESET and the zoom slider should be right now: fully on until
+    /// <see cref="ControlsHold"/> after the last touch, then out over
+    /// <see cref="ControlsFade"/>, then gone.
+    /// </summary>
+    float ControlsAlpha()
+    {
+        // Not touched since the session began or the last RESET -- so the view
+        // is wherever it opened, and there is nothing to offer a way back from.
+        if (_lastTouch <= 0f) return 0f;
+
+        float since = Time.unscaledTime - _lastTouch;
+        if (since <= ControlsHold) return 1f;
+        if (since >= ControlsHold + ControlsFade) return 0f;
+        return 1f - (since - ControlsHold) / ControlsFade;
+    }
+
+    /// <summary>
+    /// The bottom-right corner of the body, left of the zoom slider.
+    ///
+    /// The map has no description column to hang a strip under -- it is one
+    /// surface, edge to edge -- so this is a corner of its own rather than a
+    /// band across anything. Narrow, because the one action that lands here is
+    /// a single short word.
+    /// </summary>
+    public Rect ActionPane
+    {
+        get
+        {
+            const float w = 220f, margin = 24f;
+            float h = DsActionBar.PaneBand(1);
+            var body = DsLayout.Current.Body;
+            float right = body.xMax - margin;
+            if (_slider != null) right = Mathf.Min(right, _mapRect.x + _slider.Hit.xMin);
+            return new Rect(right - w, body.yMax - h - margin, w, h);
+        }
+    }
+}
+#endif
