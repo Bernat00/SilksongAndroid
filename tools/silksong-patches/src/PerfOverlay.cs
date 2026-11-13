@@ -194,6 +194,7 @@ public class PerfOverlay : MonoBehaviour
      *  BSPs). First readable wins. */
     const string BATTERY_VOLTAGE_PATH = "/sys/class/power_supply/battery/voltage_now";
     const string BATTERY_VOLTAGE_ALT_PATH = "/sys/class/power_supply/bms/voltage_now";
+    const string BATTERY_CURRENT_AVG_PATH = "/sys/class/power_supply/battery/current_avg";
     const string BATTERY_CURRENT_PATH = "/sys/class/power_supply/battery/current_now";
     const string BATTERY_STATUS_PATH = "/sys/class/power_supply/battery/status";
 
@@ -201,6 +202,15 @@ public class PerfOverlay : MonoBehaviour
     long _prevCounterUah = -1L;
     long _prevCounterAtMsTicks;
     float _counterWatts = float.NaN;   // smoothed estimate
+    int _counterSamples;               // warm-up count for unit calibration
+    // Resolution flags for the raw-current gauge. The ABI says current_now
+    // is ALWAYS microamps, but Samsung fuel gauges report milliamps against
+    // their own dumpsys, so pure magnitude inference is ambiguous for any
+    // reading between ~10 and ~100 (µA would say 0.01–0.1 A, the mA gauge
+    // would say 10–100 A of current flow). Once the charge-counter delta
+    // has warmed up it is an independent current measurement, and the ratio
+    // settles the question from data instead of guesses.
+    bool _gaugeIsMilliA;
 
     /**
      * The charge counter (BatteryManager property 1, microamp-hours of
@@ -233,6 +243,7 @@ public class PerfOverlay : MonoBehaviour
         var dUah = counter - _prevCounterUah;
         _prevCounterUah = counter;
         _prevCounterAtMsTicks = nowTs;
+        _counterSamples++;
         if (volts <= 0f) return _counterWatts; // no voltage, no watts
         // uAh -> mAh (/1000); mAh * V = mJ? no: mAh x V = Ws? exactly:
         // 1 mAh at V volts = V mW for an hour = V * 3.6 J. Per second:
@@ -304,9 +315,9 @@ public class PerfOverlay : MonoBehaviour
         long value = 0;
         try
         {
-            foreach (var path in new[] { BATTERY_CURRENT_PATH })
+            foreach (var path in new[] { BATTERY_CURRENT_AVG_PATH, BATTERY_CURRENT_PATH })
             {
-                try { value = long.Parse(File.ReadAllText(path).Trim()); break; } catch (Exception) { }
+                try { var v = long.Parse(File.ReadAllText(path).Trim()); if (v != 0) { value = v; break; } } catch (Exception) { }
             }
         }
         catch (Exception) { }
@@ -315,19 +326,34 @@ public class PerfOverlay : MonoBehaviour
             try { value = _batteryManager.Call<long>("getLongProperty", 2); } catch (Exception) { }
         }
         raw = value;
-        var amps = Math.Abs(value) switch
+        // Warm the counter during EVERY battery sample — it must run while the
+        // instantaneous reading resolves too, or calibration (below) never
+        // accumulates samples. Cheap: one BatteryManager property read.
+        var warmedW = CounterWatts(volts);
+        // Calibration first (data beats heuristics), then the ABI ladder.
+        if (_counterSamples >= 3 && volts > 0f && !float.IsNaN(_counterWatts))
         {
-            > 100_000 => value / 1_000_000f,   // microamps: the convention
-            > 100 => value / 1_000f,           // milliamps: Samsung's
-            > 5 => value / 1_000f,             // milliamps, parked
-            > 0 => value / 1_000_000f,         // microamps, parked
-            _ => 0f,
+            var counterA = _counterWatts / volts;
+            var ratio = counterA * 1_000_000f / Math.Max(Math.Abs(value), 1);
+            _gaugeIsMilliA = ratio > 200f && ratio < 5000f;   // raw is ~1000× the true amps
+        }
+        float amps = float.NaN;   // NaN until the unit of `value` is known
+        var abs = Math.Abs(value);
+        if (_gaugeIsMilliA && abs > 0) amps = value / 1_000f;
+        else if (abs > 0) amps = abs switch
+        {
+            // Per the sysfs-class-power ABI everything above ~10 mA raw is
+            // unambiguously microamps (a mA gauge would mean 10+ amps);
+            // Samsung's mA zone is their realistic gauge range (idle ~0.1,
+            // 45 W charge ≈ 5 A at 5 V).
+            > 10_000 => value / 1_000_000f,
+            > 5 => value / 1_000f,
+            _ => float.NaN,   // below 5 raw: either 5 µA of µA-speak or a zero-ish mA gauge — unresolved
         };
-        if (amps > 0f) return amps;
-        // Everything instantaneous was sealed: derive amps from the smoothed
-        // counter watts, which is the only signal that moved.
-        var w = CounterWatts(volts);
-        return !float.IsNaN(w) && volts > 0f ? w / volts : 0f;
+        if (!float.IsNaN(amps)) return amps;
+        // Everything instantaneous was sealed/unresolved: derive amps from the
+        // smoothed counter delta, which is the only unit-unambiguous signal.
+        return !float.IsNaN(warmedW) && volts > 0f ? warmedW / volts : 0f;
     }
 
 
@@ -355,7 +381,10 @@ public class PerfOverlay : MonoBehaviour
         try
         {
             var text = File.ReadAllText(BATTERY_STATUS_PATH);
-            if (text.Contains("harg") || text.Contains("Full")) return true;
+            // ABI: only "Charging" means current INTO the battery; "Full"
+            // means the charge is complete (plugged in, net ~zero draw) —
+            // the old code read Full as up, which inflated the W sign.
+            if (text.Contains("Charging")) return true;
             if (text.Length > 0) return false;
         }
         catch (Exception) { }
@@ -537,7 +566,13 @@ public class PerfOverlay : MonoBehaviour
             s.VoltageV = ReadBatteryVoltageVolts();
             s.CurrentA = ReadCurrentAmps(out s.CurrentUa, s.VoltageV);
             s.ChargingUp = ReadChargeDirectionUp();
-            s.PowerW = s.VoltageV > 0f ? Math.Abs(s.CurrentA) * s.VoltageV : CounterWatts(s.VoltageV);
+            // Instantaneous watts only from a RESOLVED unit (see
+            // ReadCurrentAmps); an unresolved gauge falls back to the
+            // smoothed charge-counter estimate, which carries no unit
+            // ambiguity because it is measured, not inferred.
+            s.PowerW = (s.VoltageV > 0f && !float.IsNaN(s.CurrentA))
+                ? Math.Abs(s.CurrentA) * s.VoltageV
+                : CounterWatts(s.VoltageV);
         }
         if (_logToFile) s.BattTempC = ReadBatteryTempC();
         return s;

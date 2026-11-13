@@ -19,16 +19,32 @@ import java.io.File
 
 class SettingsStore(context: Context) {
 
-    private val prefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    // Held so every write can re-derive the exported file immediately:
+    // the game reads ONLY that file (cross-process), so an export that
+    // waits for the next launch is an export that lies.
+    private val appContext: Context = context.applicationContext
+    private val prefs: SharedPreferences = appContext.getSharedPreferences(
+        PREFS_NAME, Context.MODE_PRIVATE)
+
+    /**
+     * The one settings pathway: write the preference, then re-export in the
+     * same breath. Every property setter routes through this — nothing that
+     * changes a setting can forget to publish it to the game side, which is
+     * exactly the bug class the old launch-time-only export produced (the
+     * on-screen controls toggle "did nothing" until relaunch).
+     */
+    private fun changed(key: String, value: Boolean) {
+        prefs.edit().putBoolean(key, value).apply()
+        exportForGame(appContext)
+    }
 
     var autoPull: Boolean
         get() = prefs.getBoolean(KEY_AUTO_PULL, false)
-        set(value) { prefs.edit().putBoolean(KEY_AUTO_PULL, value).apply() }
+        set(value) { changed(KEY_AUTO_PULL, value) }
 
     var autoPush: Boolean
         get() = prefs.getBoolean(KEY_AUTO_PUSH, false)
-        set(value) { prefs.edit().putBoolean(KEY_AUTO_PUSH, value).apply() }
+        set(value) { changed(KEY_AUTO_PUSH, value) }
 
     /**
      * When enabled, an OnGUI overlay rendered in the Unity game shows
@@ -42,7 +58,7 @@ class SettingsStore(context: Context) {
      */
     var perfOverlay: Boolean
         get() = prefs.getBoolean(KEY_PERF_OVERLAY, false)
-        set(value) { prefs.edit().putBoolean(KEY_PERF_OVERLAY, value).apply() }
+        set(value) { changed(KEY_PERF_OVERLAY, value) }
 
     /**
      * When enabled, skip Silksong's startup intro (studio logos +
@@ -56,7 +72,7 @@ class SettingsStore(context: Context) {
      */
     var skipIntro: Boolean
         get() = prefs.getBoolean(KEY_SKIP_INTRO, false)
-        set(value) { prefs.edit().putBoolean(KEY_SKIP_INTRO, value).apply() }
+        set(value) { changed(KEY_SKIP_INTRO, value) }
 
     /**
      * Dual-screen support. When enabled, the Unity side (DualScreenV2, one of
@@ -69,7 +85,7 @@ class SettingsStore(context: Context) {
      */
     var dualScreen: Boolean
         get() = prefs.getBoolean(KEY_DUAL_SCREEN, true)
-        set(value) { prefs.edit().putBoolean(KEY_DUAL_SCREEN, value).apply() }
+        set(value) { changed(KEY_DUAL_SCREEN, value) }
 
     /**
      * Also keep the original health / crest / silk / equipped-tool HUD on the main screen
@@ -78,7 +94,7 @@ class SettingsStore(context: Context) {
      */
     var showTopHud: Boolean
         get() = prefs.getBoolean(KEY_SHOW_TOP_HUD, false)
-        set(value) { prefs.edit().putBoolean(KEY_SHOW_TOP_HUD, value).apply() }
+        set(value) { changed(KEY_SHOW_TOP_HUD, value) }
 
     /**
      * Unlock the aspect ratio.
@@ -102,7 +118,7 @@ class SettingsStore(context: Context) {
      */
     var wideAspect: Boolean
         get() = prefs.getBoolean(KEY_WIDE_ASPECT, false)
-        set(value) { prefs.edit().putBoolean(KEY_WIDE_ASPECT, value).apply() }
+        set(value) { changed(KEY_WIDE_ASPECT, value) }
 
     /**
      * Keep the screen on while the game runs. Read by KeepScreenOn.cs via
@@ -112,7 +128,7 @@ class SettingsStore(context: Context) {
      */
     var keepScreenOn: Boolean
         get() = prefs.getBoolean(KEY_KEEP_SCREEN_ON, true)
-        set(value) { prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, value).apply() }
+        set(value) { changed(KEY_KEEP_SCREEN_ON, value) }
 
     /**
      * Append the one-second perf rows to persistentDataPath/perf/, and write
@@ -121,7 +137,7 @@ class SettingsStore(context: Context) {
      */
     var perfLog: Boolean
         get() = prefs.getBoolean(KEY_PERF_LOG, false)
-        set(value) { prefs.edit().putBoolean(KEY_PERF_LOG, value).apply() }
+        set(value) { changed(KEY_PERF_LOG, value) }
 
     /**
      * On-screen touch controls. Read by VirtualPad.cs through the exported
@@ -131,7 +147,7 @@ class SettingsStore(context: Context) {
      */
     var touchOverlay: Boolean
         get() = prefs.getBoolean(KEY_TOUCH_OVERLAY, true)
-        set(value) { prefs.edit().putBoolean(KEY_TOUCH_OVERLAY, value).apply() }
+        set(value) { changed(KEY_TOUCH_OVERLAY, value) }
 
     /**
      * GOG cloud saves - pull the cloud before launching and push after the
@@ -141,11 +157,11 @@ class SettingsStore(context: Context) {
      */
     var gogAutoPull: Boolean
         get() = prefs.getBoolean(KEY_GOG_AUTO_PULL, false)
-        set(value) { prefs.edit().putBoolean(KEY_GOG_AUTO_PULL, value).apply() }
+        set(value) { changed(KEY_GOG_AUTO_PULL, value) }
 
     var gogAutoPush: Boolean
         get() = prefs.getBoolean(KEY_GOG_AUTO_PUSH, false)
-        set(value) { prefs.edit().putBoolean(KEY_GOG_AUTO_PUSH, value).apply() }
+        set(value) { changed(KEY_GOG_AUTO_PUSH, value) }
 
     /**
      * Hands the game the settings it needs, as a file it can read.
@@ -161,8 +177,9 @@ class SettingsStore(context: Context) {
      * own business and are deliberately not here: a setting the game cannot
      * use is a setting somebody will eventually try to make it use.
      *
-     * Written whole every time, immediately before launch, so it cannot drift
-     * from what the user last chose.
+     * Written whole on every settings change (see [changed]), plus once
+     * before launch as a belt-and-braces ensure — so it cannot drift from
+     * what the user last chose.
      */
     fun exportForGame(context: Context) {
         val dir = context.getExternalFilesDir(null) ?: return

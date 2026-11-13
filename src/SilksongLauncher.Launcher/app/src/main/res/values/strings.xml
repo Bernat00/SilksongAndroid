@@ -13,6 +13,7 @@
     <!-- Main launcher action buttons. -->
     <string name="action_log_in">Log in</string>
     <string name="action_log_in_as">Steam · Log out</string>
+    <string name="action_gog_sync">Sync saves</string>
     <string name="action_pull_saves">&#8595;  Download saves</string>
     <string name="action_pull_saves_busy">Download saves</string>
     <string name="action_push_saves">&#8593;  Upload saves</string>

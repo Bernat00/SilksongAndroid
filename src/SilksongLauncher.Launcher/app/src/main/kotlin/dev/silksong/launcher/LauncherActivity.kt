@@ -97,7 +97,6 @@ class LauncherActivity : Activity() {
         btnLogin = findViewById(R.id.btn_login)
         btnGogLogin = findViewById(R.id.btn_gog_login)
         btnGogLogin.setOnClickListener { onGogLoginClicked() }
-        refreshGogLoginLabel()
         btnPull = findViewById(R.id.btn_pull)
         btnPush = findViewById(R.id.btn_push)
         spinPull = findViewById(R.id.spin_pull)
@@ -188,7 +187,7 @@ class LauncherActivity : Activity() {
         if (requestCode == 7123) {
             val ok = resultCode == GogLoginActivity.RESULT_SIGNED_IN
             LauncherLog.log("GOG sign-in: " + if (ok) "succeeded" else "did not finish")
-            refreshGogLoginLabel()
+            applyStoreButtons()
             return
         }
         if (requestCode != REQ_LOGIN) return
@@ -218,19 +217,38 @@ class LauncherActivity : Activity() {
             txtLoginStatus.text = "Signed in as ${c.accountName}"
             btnLogin.text = getString(R.string.action_log_in_as)
         }
-        // The manual Download/Upload buttons serve EITHER store, and say
-        // which: a GOG depot renames them Sync/… and the STEAM pair is
-        // hidden entirely unless a Steam session exists — a hidden button
-        // that does nothing is still a button in the way.
+        // Every depot-dependent button — GOG sign-in toggle, pull and push —
+        // is written by [applyStoreButtons]; this function only owns the
+        // Steam login row above.
+        applyStoreButtons()
+    }
+
+    /**
+     * The single writer for every depot-dependent button: the GOG sign-in
+     * toggle, the pull button and its push twin. Sign-in results, sign-outs,
+     * depot switches and finished cloud jobs all route through here.
+     *
+     * Before this existed there were three ad-hoc writers (launch refresh, a
+     * copy inside the cloud-job finally, and the GOG-label-only refresh),
+     * and they disagreed in the exact ways the user reported: a finished
+     * sync restored Steam labels over a GOG depot; the job finally enabled
+     * buttons by STEAM-credential rule on a GOG depot (dead Sync button for
+     * GOG users); sign-outs never touched the Sync button left enabled on
+     * dead tokens. One writer, one state, no drift.
+     */
+    private fun applyStoreButtons() {
         val gogOwns = GogSync.gogDepotPresent(this)
+        btnGogLogin.text = getString(
+            if (GogAuth.isSignedIn(this)) R.string.settings_gog_sign_out else R.string.settings_gog_sign_in)
         val gogUsable = gogOwns && GogAuth.isSignedIn(this)
-        val steamOwns = c != null && !gogOwns
+        val steamOwns = creds != null && !gogOwns
         if (gogOwns) {
-            btnPull.text = "Sync saves"
+            btnPull.text = getString(R.string.action_gog_sync)
             btnPush.text = ""
             btnPull.visibility = android.view.View.VISIBLE
             btnPush.visibility = android.view.View.GONE
             btnPull.isEnabled = gogUsable
+            btnPush.isEnabled = false
         } else {
             btnPull.text = getString(R.string.action_pull_saves)
             btnPush.text = getString(R.string.action_push_saves)
@@ -522,26 +540,10 @@ class LauncherActivity : Activity() {
                 block()
             } finally {
                 spinner?.visibility = View.GONE
-                // Both, unconditionally: cheaper than remembering which one
-                // was changed, and correct if a future caller changes both.
-                // The GOG depot renames Download→Sync on the pull side and
-                // collapses the push pair, so the store-aware refresh runs
-                // HERE too — without it a finished sync restored the Steam
-                // labels (the flip the reporter saw after every sync).
-                if (GogSync.gogDepotPresent(this@LauncherActivity)) {
-                    btnPull.text = "Sync saves"
-                    btnPush.text = ""
-                    btnPush.visibility = android.view.View.GONE
-                } else {
-                    btnPull.text = getString(R.string.action_pull_saves)
-                    btnPush.text = getString(R.string.action_push_saves)
-                    btnPush.visibility = android.view.View.VISIBLE
-                }
+                // ONE writer decides text/visibility/enabled from current
+                // store state — a job may have changed sign-in or depot.
+                applyStoreButtons()
                 btnLaunch.isEnabled = true
-                if (creds != null) {
-                    btnPull.isEnabled = true
-                    btnPush.isEnabled = true
-                }
             }
         }
     }
@@ -955,7 +957,7 @@ class LauncherActivity : Activity() {
                 .setMessage("Cloud saves stay in GOG storage; only this device signs out.")
                 .setPositiveButton("Sign out") { _, _ ->
                     GogAuth.signOut(this)
-                    refreshGogLoginLabel()
+                    applyStoreButtons()
                     LauncherLog.log("GOG: signed out")
                 }
                 .setNegativeButton("Cancel", null)
@@ -973,8 +975,4 @@ class LauncherActivity : Activity() {
             7123)
     }
 
-    private fun refreshGogLoginLabel() {
-        btnGogLogin.text = getString(
-            if (GogAuth.isSignedIn(this)) R.string.settings_gog_sign_out else R.string.settings_gog_sign_in)
-    }
 }
