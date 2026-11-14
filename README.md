@@ -26,6 +26,7 @@ Uninstalling clears the launcher's settings and sign-in tokens. Your game files 
 - **Steam integration (optional)**: Sign in to Steam if you want the app to download game files and/or your Steam cloud saves for you
 - **GOG cloud saves (experimental)**: GOG sign-in with manual save download/upload. **Very vibe-coded** — see the experimental note below
 - **On-screen touch controls (experimental)**: A virtual pad for handheld play: movement stick, Jump/Cast/Attack/Dream Nail, Map/Inventory/Throw, Pause, and an inventory overlay with Exit and pane arrows. **Very vibe-coded**
+- **Physical controller support**: Xbox One/Series pads work, including the Menu/View buttons the game itself never binds — they are aliased to Pause and Inventory. The on-screen pad and a physical controller coexist; whichever gave input last wins. PlayStation Command controls get the same aliasing
 - **High performance**: Compiles to native arm64 via IL2CPP and uses Vulkan shaders
 - **Fully open source and legal**: Supply your own game files either manually or through Steam sign-in (the app downloads them for you)
 - **Compilation on device**: Download the APK and supply the game files, porting happens on device (20–30 min on Snapdragon 8 Gen 2)
