@@ -68,3 +68,18 @@ game's decompiled code in `ref/` (e.g. `InputDevice`,
 `PlayerActionSet.IncludeDevices`, `GameManager.GameState`,
 `HeroActions.MoveVector`) — including the Start/View vs Menu/Select binding
 discrepancy (upstream issue #47 work) that motivated this file.
+
+## On-screen pad state (end of 2026-11-13/14 session)
+Committed `1297242` (build #50 installed). Working: flicker gone (include refresh decoupled
+from OnGUI visibility — it only ran while the pad drew, `incTries=0` proved it), include
+hammer fires every ~0.5 s (`incl=True`, gates all pass: gm/handler/inputActions non-null).
+Not working: no input reaches the game; the game's options say "no active controller".
+Next probes (one probe each, all against decompiled ref/ — no guessed APIs):
+1. `setActions` flag never goes True in ANY build — find its assignment and what gate blocks it.
+2. The game's "no active controller" = InControl `ActiveDevice` verdict — activity-based;
+   our device commits only zeros until pressed. Find the UI check in ref/ (grep
+   `ActiveDevice` in the game's managed code) and either send activity or bind the same way
+   the real controller binds (real controller path: Android HID -> Unity legacy joystick ->
+   InputHandler/ControllerMapping -> works).
+3. Inventory/Map pills invisible for the user since #48 — suspect a port that raced the
+   APK install (#48 landed 00:10:54, port started ~00:11); clean re-port on #50 checks it.
