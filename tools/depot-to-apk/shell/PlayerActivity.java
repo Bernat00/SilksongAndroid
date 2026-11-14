@@ -40,16 +40,28 @@ public class PlayerActivity extends Activity implements IUnityPlayerLifecycleEve
     // Name fixed by the engine's native code. Do not rename.
     protected UnityPlayerForActivityOrService mUnityPlayer;
     private SecondaryDisplay secondaryDisplay;
+    private boolean keepScreenOn = true;
 
     @Override protected void onCreate(Bundle savedInstanceState)
     {
         super.onCreate(savedInstanceState);
+        // The launcher hands the setting over with the launch intent. This
+        // window is ours, so the flag belongs here -- a patch inside Unity
+        // cannot reach this Activity reliably (UnityPlayer.currentActivity is
+        // not populated for a shell-hosted player).
+        keepScreenOn = getIntent() == null || getIntent().getBooleanExtra("keep_screen_on", true);
+        if (keepScreenOn)
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        android.util.Log.i("SilksongShell", "keepScreenOn=" + keepScreenOn +
+            " flagsAfterAdd=0x" + Integer.toHexString(getWindow().getAttributes().flags));
         // Constructing the player is what starts the engine: it loads the
         // native libraries and brings up the render surface. Everything that
         // has to be in place first -- the staged libraries, the data package --
         // is done by GameActivity before it calls up into here.
         secondaryDisplay = new SecondaryDisplay(this);
         mUnityPlayer = new UnityPlayerForActivityOrService(this, this);
+        android.util.Log.i("SilksongShell",
+            "flagsAfterPlayer=0x" + Integer.toHexString(getWindow().getAttributes().flags));
         setContentView(mUnityPlayer.getFrameLayout());
         mUnityPlayer.getFrameLayout().requestFocus();
     }
@@ -91,6 +103,10 @@ public class PlayerActivity extends Activity implements IUnityPlayerLifecycleEve
     @Override protected void onResume()
     {
         super.onResume();
+        // Re-assert: anything that rebuilt the window attributes (the player,
+        // a config change, a focus round-trip) must not silently drop this.
+        if (keepScreenOn)
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (mUnityPlayer != null) mUnityPlayer.onResume();
     }
 
@@ -118,6 +134,8 @@ public class PlayerActivity extends Activity implements IUnityPlayerLifecycleEve
     @Override public void onWindowFocusChanged(boolean hasFocus)
     {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && keepScreenOn)
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (mUnityPlayer != null) mUnityPlayer.windowFocusChanged(hasFocus);
     }
 
@@ -133,14 +151,44 @@ public class PlayerActivity extends Activity implements IUnityPlayerLifecycleEve
     // that arrive at the Activity instead have to be handed over explicitly --
     // gamepad buttons and sticks in particular, which is the difference
     // between a controller working and appearing dead.
+    // Back must be caught before the view hierarchy: Unity's view consumes the
+    // key, so Activity.onKeyDown never runs and the press is lost.
+    @Override public boolean dispatchKeyEvent(KeyEvent event)
+    {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK)
+        {
+            if (event.getAction() == KeyEvent.ACTION_UP) injectEscape();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     @Override public boolean onKeyDown(int keyCode, KeyEvent event)
     {
+        if (keyCode == KeyEvent.KEYCODE_BACK) { injectEscape(); return true; }
         return injected(event) || super.onKeyDown(keyCode, event);
     }
 
     @Override public boolean onKeyUp(int keyCode, KeyEvent event)
     {
+        if (keyCode == KeyEvent.KEYCODE_BACK) return true;
         return injected(event) || super.onKeyUp(keyCode, event);
+    }
+
+    // Gesture back (targetSdk 28, so this is what the system calls). The game
+    // binds Escape to Pause and MenuCancel; injecting it keeps the game in
+    // charge instead of the Activity finishing underneath it.
+    @Override public void onBackPressed()
+    {
+        injectEscape();
+    }
+
+    private void injectEscape()
+    {
+        if (mUnityPlayer == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        mUnityPlayer.injectEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ESCAPE, 0));
+        mUnityPlayer.injectEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ESCAPE, 0));
     }
 
     @Override public boolean onGenericMotionEvent(MotionEvent event)

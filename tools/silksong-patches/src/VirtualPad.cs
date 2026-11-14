@@ -1,49 +1,51 @@
 // VirtualPad — on-screen controls, built from the game's own input model.
 //
-// THE LIBRARY QUESTION. Third-party mobile control libraries are uGUI or
-// "New Input System" shaped (EnhancedOnScreenStick, Nice Touch, BT-Gamepad),
-// dead ends here: this game reads input through InControl via hand-bound
-// PlayerActions, there is no editor to build prefab Canvases, and every
-// candidate would add a second input stack the game never consults. InControl's
-// own TouchControls ARE compiled into these assemblies — but their device gets
-// created during InControl's one-time InputManager setup, which ran before any
-// patch could exist, and a late-added TouchManager can never fire that path.
-// The route with no such trap is the one InControl documents for custom
-// hardware: a bare InputDevice subclass, attached with the public
-// InputManager.AttachDevice, reporting state through the class's public commit
-// helpers. One file, no prefabs, no shipped textures, and the device takes
-// part in ActiveDevice arbitration like a real pad.
+// THE ROAD. InControl is the input stack this game reads; on this build the
+// Android device manager is NewUnityInputDeviceManager (Unity Input System
+// Gamepads), not the legacy UnityInputDeviceManager that reads
+// Input.GetJoystickNames. A synthesized-Android-event layer therefore has no
+// consumer, and dispatching to the decor view bypasses the shell
+// PlayerActivity, which is what forwards input to Unity via injectEvent.
 //
-// VISIBILITY BY DESIGN (user-set): the pad exists when its Settings toggle is
-// on, and shows ONLY during gameplay — the game's own GameState must be
-// PLAYING. Menus, pause, inventory, cutscenes, the title: hidden (menus
-// navigate themselves by touch). A connected controller does NOT hide it;
-// both inputs coexist through InControl's ActiveDevice arbitration (last
-// device that gave input wins per action set).
+// What does work is the route InControl documents for custom hardware: an
+// InputDevice subclass attached with the public InputManager.AttachDevice.
+// The device must own every control the game binds — OnAttached only adds
+// alias controls (LeftStickX/Y, DPadX/Y, Command, style commands), and
+// UpdateWithState on a control that was never added is a silent no-op.
 //
-// THE LABELS AND THE BINDINGS. The game adds its hand-bound PlayerAction
-// bindings only when a gamepad attaches; with no pad the actions carry no
-// device bindings at all, which is what made the first pad dead and
-// unlabelled. The fix: every second, any of the game's default
-// action↔control pairs whose binding is missing gets it added
-// (GameSettings.ControllerMapping, decompiled as the source of truth: jump =
-// Action1, cast = Action2, attack = Action3, dreamNail = Action4, superDash =
-// LeftTrigger, dash = RightTrigger, quickCast = RightBumper, quickMap =
-// LeftBumper, taunt = RightStickButton). These are the game's own defaults,
-// so a controller attaching later finds the mapping it would have chosen
-// anyway; the labels resolve live first and fall back to these defaults —
-// the pad is labelled and alive from the first frame, controller or not.
+// BINDINGS COME FROM THE GAME. Attaching a known device raises
+// InputHandler.ControllerAttached/ControllerActivated, which run
+// SetActiveGamepadType -> MapControllerButtons: inputActions.Reset() and the
+// game's own ControllerMapping (jump=Action1, cast=Action2, attack=Action3,
+// dreamNail=Action4, superDash=LeftTrigger, dash=RightTrigger,
+// quickCast=RightBumper, quickMap=LeftBumper, taunt=RightStickButton,
+// OpenInventory=Select, Pause=Start). This file binds nothing and never
+// touches PlayerActionSet.Device or IncludeDevices: leaving Device null is
+// what lets InputManager.ActiveDevice arbitration decide between the pad, a
+// physical controller and the keyboard, last input wins.
+//
+// ACTIVITY. A device is active only while one of its controls has non-zero
+// committed state; idle frames publish zeros, so a physical controller takes
+// over on its next input. RequestActivation() is called once at attach and
+// on every frame that carries input, which flips ActiveDevice in the same
+// InputManager pass that consumes it.
+//
+// VISIBILITY. The pad exists when its Settings toggle is on (read once at
+// game start) and draws only during gameplay: GameState PLAYING, not paused,
+// inventory closed. Menus navigate themselves by touch; InventoryTouchInput
+// owns every touch while the inventory is open. A connected controller does
+// not hide the pad.
 //
 // COORDINATES. Unity's Input.touches use a bottom-left origin; OnGUI uses
 // top-left. Every touch is converted ONCE at the routing boundary and the
-// rest of the file speaks one convention: GUI (top-left) coordinates.
+// rest of the file speaks GUI coordinates. Draw and hit-test share one
+// ButtonRect, so what is drawn is what is hit.
 //
-// COST. One fixed pass in Update over Input.touches, commits in the device's
-// own Update against InControl's update tick, an OnGUI pass of 6 textures
-// with styles and GUIContent cached per screen size. No per-frame allocation.
+// COST. One pass over Input.touches per visible frame, one OnGUI pass over
+// cached textures/styles, no per-frame allocation.
 
-using System;
-using System.Collections.Generic;
+#if UNITY_ANDROID && !UNITY_EDITOR
+
 using InControl;
 using UnityEngine;
 
@@ -51,34 +53,58 @@ using UnityEngine;
 
 public class OnScreenDevice : InputDevice
 {
-    public Vector2 Stick { get; set; }
-    public bool[] Buttons { get; } = new bool[8];
+    public const int ButtonCount = 8;
+    public const int Jump = 0, Cast = 1, Attack = 2, DreamNail = 3,
+                     Map = 4, Inventory = 5, Throw = 6, Pause = 7;
+
+    readonly bool[] buttons = new bool[ButtonCount];
+    Vector2 stick;
 
     public OnScreenDevice() : base("On-Screen Controls")
     {
+        Meta = "On-Screen Controls";
         DeviceClass = InputDeviceClass.Controller;
-        DeviceStyle = InputDeviceStyle.Unknown;
+        DeviceStyle = InputDeviceStyle.Unknown; // IsKnown stays true -> IsUnknown false
+
+        // These must be created here, in the ctor. GetControl returns
+        // InputControl.Null for anything not added, and every Update/Commit
+        // helper on a Null control is a silent no-op.
+        AddControl(InputControlType.LeftStickLeft, "Left Stick Left", 0.2f, 0.9f);
+        AddControl(InputControlType.LeftStickRight, "Left Stick Right", 0.2f, 0.9f);
+        AddControl(InputControlType.LeftStickUp, "Left Stick Up", 0.2f, 0.9f);
+        AddControl(InputControlType.LeftStickDown, "Left Stick Down", 0.2f, 0.9f);
+        AddControl(InputControlType.Action1, "Jump");
+        AddControl(InputControlType.Action2, "Cast");
+        AddControl(InputControlType.Action3, "Attack");
+        AddControl(InputControlType.Action4, "Dream Nail");
+        AddControl(InputControlType.LeftBumper, "Map");
+        AddControl(InputControlType.RightBumper, "Quick Cast");
+        AddControl(InputControlType.RightStickButton, "Taunt");
+        AddControl(InputControlType.Select, "Inventory"); // not a "standard" target
+        AddControl(InputControlType.Start, "Pause");
     }
 
+    /** One atomic snapshot per frame; the router is the only writer. */
+    public void SetInput(Vector2 value, int buttonMask)
+    {
+        stick = new Vector2(Mathf.Clamp(value.x, -1f, 1f), Mathf.Clamp(value.y, -1f, 1f));
+        for (int i = 0; i < ButtonCount; i++)
+            buttons[i] = (buttonMask & (1 << i)) != 0;
+    }
+
+    /** Feeds control state only. InputManager.CommitDevices calls Commit. */
     public override void Update(ulong updateTick, float deltaTime)
     {
-        // The stick is expressed as the four directional controls, split the
-        // way the merged InputDevice's own methods do, then committed so
-        // ProcessLeftStick can derive the LeftStick vector the game reads.
-        var v = Stick;
-        UpdateLeftStickWithValue(new Vector2(v.x, v.y), updateTick, deltaTime);
-        CommitLeftStick();
-
-        Action1.CommitWithState(Buttons[0], updateTick, deltaTime);      // Jump
-        Action2.CommitWithState(Buttons[1], updateTick, deltaTime);      // Cast
-        Action3.CommitWithState(Buttons[2], updateTick, deltaTime);      // Attack
-        Action4.CommitWithState(Buttons[3], updateTick, deltaTime);      // Dream Nail
-        RightTrigger.CommitWithState(Buttons[4], updateTick, deltaTime); // Dash
-        LeftTrigger.CommitWithState(Buttons[5], updateTick, deltaTime);  // Super Dash
-        LeftBumper.CommitWithState(Buttons[6], updateTick, deltaTime);   // Map
-        GetControl(InputControlType.Select).CommitWithState(Buttons[7], updateTick, deltaTime); // Inventory
-
-        Commit(updateTick, deltaTime);
+        UpdateLeftStickWithValue(stick, updateTick, deltaTime);
+        UpdateWithState(InputControlType.Action1, buttons[Jump], updateTick, deltaTime);
+        UpdateWithState(InputControlType.Action2, buttons[Cast], updateTick, deltaTime);
+        UpdateWithState(InputControlType.Action3, buttons[Attack], updateTick, deltaTime);
+        UpdateWithState(InputControlType.Action4, buttons[DreamNail], updateTick, deltaTime);
+        UpdateWithState(InputControlType.LeftBumper, buttons[Map], updateTick, deltaTime);
+        UpdateWithState(InputControlType.Select, buttons[Inventory], updateTick, deltaTime);
+        // Tools (the thrown needles/pins) are thrown with QuickCast, not Cast.
+        UpdateWithState(InputControlType.RightBumper, buttons[Throw], updateTick, deltaTime);
+        UpdateWithState(InputControlType.Start, buttons[Pause], updateTick, deltaTime);
     }
 }
 
@@ -86,127 +112,45 @@ public class OnScreenDevice : InputDevice
 
 public class VirtualPad : MonoBehaviour
 {
-    enum PadButton { Jump = 0, Cast, Attack, DreamNail, Dash, SuperDash, Map, Inventory }
-
-    /// <summary>
-    /// Feeds the virtual pad into Unity's LEGACY joystick stream as real
-    /// Android input events. This is the road the physical controller takes
-    /// (Android HID -> Unity event queue -> Input.GetJoystickNames/GetAxis/
-    /// GetKey -> InControl's OWN UnityInputDeviceManager -> the game), so
-    /// device creation, attachment, activity and the options-screen verdict
-    /// all come from the game's existing machinery. Events are synthesized
-    /// against a real attached joystick's device id, so name resolution
-    /// succeeds and the same device profile applies; the physical pad keeps
-    /// overriding us the moment the player touches it.
-    /// </summary>
-    static class JoystickInjector
+    enum PadButton
     {
-        static int joyDeviceId = -1;
-        static float sentLx, sentLy;
-        const int SOURCE_JOYSTICK = 0x1000010;
-        const int BTN_A = 96, BTN_B = 97, BTN_X = 99, BTN_Y = 100;
-        const int BTN_L1 = 102, BTN_R1 = 103, BTN_L2 = 104, BTN_R2 = 105;
-
-        /// Axis/button state to push. Values are InControl-convention (-1..1, Y up).
-        public static void Push(float lx, float ly, bool a, bool b, bool x, bool y, bool l1, bool l2)
-        {
-            ResolveJoystick();
-            if (joyDeviceId < 0) return;
-
-            long now = Now();
-            if (Mathf.Abs(lx - sentLx) > 0.03f || Mathf.Abs(ly - sentLy) > 0.03f)
-            {
-                SendAxes(now, lx, ly);
-                sentLx = lx; sentLy = ly;
-            }
-            Key(BTN_A, a, now);
-            Key(BTN_B, b, now);
-            Key(BTN_X, x, now);
-            Key(BTN_Y, y, now);
-            Key(BTN_L1, l1, now);
-            Key(BTN_L2, l2, now);
-        }
-
-        static void ResolveJoystick()
-        {
-            try
-            {
-                using var devClass = new AndroidJavaClass("android.view.InputDevice");
-                int[] ids = devClass.CallStatic<int[]>("getDeviceIds");
-                if (ids == null) return;
-                for (int i = 0; i < ids.Length; i++)
-                {
-                    using var dev = devClass.CallStatic<AndroidJavaObject>("getDevice", ids[i]);
-                    if (dev == null) continue;
-                    int sources = dev.Call<int>("getSources");
-                    if ((sources & SOURCE_JOYSTICK) != 0 && ids[i] != joyDeviceId)
-                    {
-                        joyDeviceId = ids[i];
-                        Debug.Log("[VPadj] injecting via device id " + joyDeviceId + " (" +
-                                  dev.Call<string>("getName") + ")");
-                    }
-                }
-            }
-            catch (Exception e) { Debug.Log("[VPadj] resolve: " + e.Message); }
-        }
-
-        static void SendAxes(long now, float lx, float ly)
-        {
-            try
-            {
-                using var cls = new AndroidJavaClass("android.view.MotionEvent");
-                using var ev = cls.CallStatic<AndroidJavaObject>("obtain",
-                    now - 50, now, 2 /*ACTION_MOVE*/, lx, ly,
-                    1f /*pressure*/, 1f /*size*/, 0 /*metaState*/,
-                    0.1f, 0.1f, joyDeviceId, 0 /*edgeFlags*/);
-                if (ev == null) return;
-                ev.Call("setSource", SOURCE_JOYSTICK);
-                using var decor = DecorView();
-                if (decor != null) decor.Call<bool>("dispatchGenericMotionEvent", ev);
-            }
-            catch (Exception e) { Debug.Log("[VPadj] axes: " + e.Message); }
-        }
-
-        static void Key(int code, bool down, long now)
-        {
-            try
-            {
-                using var ev = new AndroidJavaObject("android.view.KeyEvent",
-                    now, now, down ? 0 : 1 /*ACTION_DOWN:0 UP:1*/, code, 0, 0, joyDeviceId, 0, 0, SOURCE_JOYSTICK);
-                using var decor = DecorView();
-                if (decor != null) decor.Call<bool>("dispatchKeyEvent", ev);
-            }
-            catch (Exception e) { Debug.Log("[VPadj] key " + code + ": " + e.Message); }
-        }
-
-        static AndroidJavaObject DecorView()
-        {
-            using var unity = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
-            using var activity = unity.GetStatic<AndroidJavaObject>("currentActivity");
-            if (activity == null) return null;
-            return activity.Call<AndroidJavaObject>("getWindow").Call<AndroidJavaObject>("getDecorView");
-        }
-
-        static long Now()
-        {
-            using var sys = new AndroidJavaClass("java.lang.System");
-            return sys.CallStatic<long>("currentTimeMillis");
-        }
+        Jump = OnScreenDevice.Jump,
+        Cast = OnScreenDevice.Cast,
+        Attack = OnScreenDevice.Attack,
+        DreamNail = OnScreenDevice.DreamNail,
+        Map = OnScreenDevice.Map,
+        Inventory = OnScreenDevice.Inventory,
+        Throw = OnScreenDevice.Throw,
+        Pause = OnScreenDevice.Pause,
     }
+
+    const int ButtonCount = OnScreenDevice.ButtonCount;
 
     // ── layout, as fractions of the screen ──────────────────────────────────
 
     const float CLUSTER_CX = 0.845f;   // face diamond centre, fraction of width
-    const float CLUSTER_CY = 0.695f;   // fraction of height, from TOP (Gui Y)
-    const float DIAMOND_R = 0.165f;    // face centre offset, of vmin (≈2.2 radii)
+    const float CLUSTER_CY = 0.59f;    // fraction of height, from TOP (Gui Y)
+    const float DIAMOND_R = 0.15f;     // face centre offset, of vmin
     const float FACE_R = 0.075f;       // face hit/draw radius, of vmin
     const float PILL_W = 0.18f;        // pill width, of width
-    const float PILL_H = 0.115f;       // pill height, of vmin
-    const float PILL_CY = 0.235f;      // pill centre Y, of vmin, from top
-    const float PILL_SUPER_CX = 0.115f;
-    const float PILL_MAP_CX = 0.315f;
-    const float PILL_INV_CX = 0.515f;
-    const float PILL_DASH_CX = 0.735f;
+    const float PILL_H = 0.105f;       // pill height, of vmin
+    const float PILL_CY = 0.29f;       // pill centre Y, of vmin, from top
+    const float PILL_MAP_CX = 0.20f;
+    const float PILL_INV_CX = 0.50f;
+    const float PILL_THROW_CX = 0.80f;
+    const float PILL_PAUSE_W = 0.09f;  // pause, in the top-right corner
+    const float PILL_PAUSE_H = 0.07f;
+    const float PILL_PAUSE_CX = 0.94f;
+    const float PILL_PAUSE_CY = 0.075f;
+
+    // Inventory overlay: exit in the top-right, pane arrows in the bottom corners.
+    const float INV_W = 0.10f;
+    const float INV_H = 0.075f;
+    const float INV_EXIT_CX = 0.93f;
+    const float INV_EXIT_CY = 0.085f;
+    const float INV_LEFT_CX = 0.09f;
+    const float INV_RIGHT_CX = 0.91f;
+    const float INV_ARROW_CY = 0.92f;
     const float STICK_ZONE_W = 0.40f;  // left thumb zone
     const float STICK_ZONE_H = 0.70f;  // of height, from top
     const float STICK_RING_R = 0.125f; // resting ring radius, of vmin
@@ -214,78 +158,56 @@ public class VirtualPad : MonoBehaviour
     const float STICK_REST_Y = 0.30f;  // of height, from bottom
     const float KNOB_RANGE = 0.65f;    // knob travel, of ring radius
 
+    static readonly InputControlType[] Targets =
+    {
+        InputControlType.Action1,       // Jump
+        InputControlType.Action2,       // Cast
+        InputControlType.Action3,       // Attack
+        InputControlType.Action4,       // Dream Nail
+        InputControlType.LeftBumper,    // Map
+        InputControlType.Select,        // Inventory
+        InputControlType.RightBumper,   // Throw (tools / pins)
+        InputControlType.Start,         // Pause / back
+    };
+
+    static readonly string[] FallbackLabels =
+    {
+        "Jump", "Cast", "Attack", "Dream",
+        "Map", "Inventory", "Throw", "II",
+    };
+
+    static bool Verbose;
+
+    enum PadMode { Hidden, Play, Inventory }
+
     OnScreenDevice device;
-    bool deviceAttached;
-    bool visible;
+    PadMode mode;
+
+    // Inventory-mode labels.
+    GUIContent invExitContent, invLeftContent, invRightContent;
 
     // Touch bookkeeping; -1 means no finger holds that role. The finger map
     // IS the button state: no second copy to keep coherent.
     int stickFinger = -1;
     Vector2 stickOrigin;               // GUI pixels
     Vector2 stickKnob;                 // -1..1, InControl convention (Y up)
-    readonly int[] buttonFinger = { -1, -1, -1, -1, -1, -1 };
+    readonly int[] buttonFinger = new int[ButtonCount];
 
-    // Labels, refreshed once a second. Empty string = no action bound to that
-    // control; the button still draws and still sends its control.
-    readonly string[] labels = new string[6];
-    readonly GUIContent[] labelContent = new GUIContent[8];
-    int labelCooldown;
-    int liveToggleCooldown;
-    float _diagTimer;                  // per-two-second diagnostic line (debug)
-    global::GlobalEnums.GameState gm_GameState()
-    {
-        var gm = GameManager._instance;
-        return gm != null ? gm.GameState : global::GlobalEnums.GameState.INACTIVE;
-    }
+    readonly string[] labels = new string[ButtonCount];
+    readonly GUIContent[] labelContent = new GUIContent[ButtonCount];
 
-    bool actionsSet;                   // the IncludeDevices hammer was placed
     float lastPlayingTime = -99f;
-    bool includedDevices;
-    int includeTries;
-    float _refreshTimer;
+    float labelTimer;
 
-    GUIStyle labelStyle;
+    GUIStyle pillStyle;
+    GUIStyle faceStyle;
     int styleScreenWidth, styleScreenHeight;
-    Texture2D ringTex;
-
-    static readonly InputControlType[] Targets =
-    {
-        InputControlType.Action1,       // was Jump
-        InputControlType.Action2,       // was Cast
-        InputControlType.Action3,       // was Attack
-        InputControlType.Action4,       // was Dream Nail
-        InputControlType.RightTrigger,  // was Dash
-        InputControlType.LeftTrigger,   // was Super Dash
-        InputControlType.LeftBumper,    // Map: the game's own map toggle
-        InputControlType.Select,        // Inventory: opens/closes the full inventory
-    };
-
-    /**
-     * The game's own default action↔control pairs, as the decompiled
-     * GameSettings.ControllerMapping holds them; see the class comment for
-     * the two uses (binding ensure + label fallback).
-     */
-    static readonly (string key, string label, InputControlType target)[] Defaults =
-    {
-        ("jump", "Jump", InputControlType.Action1),
-        ("cast", "Cast", InputControlType.Action2),
-        ("attack", "Attack", InputControlType.Action3),
-        ("dreamNail", "Dream Nail", InputControlType.Action4),
-        ("superDash", "Super Dash", InputControlType.LeftTrigger),
-        ("dash", "Dash", InputControlType.RightTrigger),
-        ("quickCast", "Quick Cast", InputControlType.RightBumper),
-        ("quickMap", "Map", InputControlType.LeftBumper),
-        ("openInventory", "Inventory", InputControlType.Select),
-        ("moveLeft", "Left", InputControlType.LeftStickLeft),
-        ("moveRight", "Right", InputControlType.LeftStickRight),
-        ("moveUp", "Up", InputControlType.LeftStickUp),
-        ("moveDown", "Down", InputControlType.LeftStickDown),
-        ("taunt", "Taunt", InputControlType.RightStickButton),
-    };
+    Texture2D circleRest, circleHeld, pillRest, pillHeld;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
     {
+        Verbose = Debug.isDebugBuild || SilksongPatches.Settings.GetBool("touch_debug", false);
         if (!SilksongPatches.Settings.GetBool("touch_overlay", true)) return;
         var go = new GameObject("__VirtualPad__");
         DontDestroyOnLoad(go);
@@ -295,92 +217,94 @@ public class VirtualPad : MonoBehaviour
     void Start()
     {
         device = new OnScreenDevice();
-        for (int i = 0; i < labelContent.Length; i++)
-            labelContent[i] = new GUIContent("");
+        invExitContent = new GUIContent("Exit");
+        invLeftContent = new GUIContent("<");
+        invRightContent = new GUIContent(">");
+        for (int i = 0; i < ButtonCount; i++)
+        {
+            labels[i] = FallbackLabels[i];
+            labelContent[i] = new GUIContent(labels[i]);
+        }
     }
-
-    bool settingOn = true;
 
     void Update()
     {
-        // The toggle is read LIVE from the exported settings file: the
-        // launcher rewrites it at exit of its Settings screen, and waiting
-        // for a game relaunch left the user flipping a toggle that did
-        // nothing until then.
-        if (++liveToggleCooldown >= 30) { liveToggleCooldown = 0; settingOn = SilksongPatches.Settings.GetBool("touch_overlay", true); }
-        if (!settingOn) { visible = false; return; }
+        EnsureAttached();
+        UpdateVisibility();
 
-        if (!deviceAttached)
+        if (mode == PadMode.Play) RoutePlayTouches();
+        else if (mode == PadMode.Inventory) RouteInventoryTouches();
+        else device.SetInput(Vector2.zero, 0);
+
+        labelTimer -= Time.unscaledDeltaTime;
+        if (labelTimer <= 0f)
         {
-            if (!InputManager.IsSetup) return;
-            InputManager.AttachDevice(device);
-            deviceAttached = true;
+            labelTimer = 0.5f;
+            RefreshLabels();
         }
+    }
 
-        // The DEVICE is zeroed every frame before routing; a held finger
-        // re-sets its role in RouteTouches from its own touch record (Unity
-        // guarantees an Ended phase before a touch disappears, so nothing is
-        // lost across frames).
-        for (int i = 0; i < device.Buttons.Length; i++) device.Buttons[i] = false;
-        device.Stick = Vector2.zero;
-
-        // GAMEPLAY ONLY, with a short hysteresis: the game's state can bob
-        // in and out of PLAYING between scenes, and an overlay that
-        // disappears for a frame and returns reads as a flicter.
-        var gm = GameManager._instance;
-        if (gm != null && gm.GameState == global::GlobalEnums.GameState.PLAYING) lastPlayingTime = Time.unscaledTime;
-        visible = (Time.unscaledTime - lastPlayingTime) < 1.5f;
-
-        if (visible) RouteTouches();
-
-        // Include/label refresh on its own clock, NOT the draw path: it used
-        // to be called from OnGUI after the visibility gate, so a hidden pad
-        // (menus, load transitions -- or the visibility flicker the user
-        // reports) never wired its own input. incTries=0 with all three
-        // input objects proven present was the smoking gun.
-        _refreshTimer -= Time.unscaledDeltaTime;
-        if (_refreshTimer <= 0f) { _refreshTimer = 0.5f; RefreshLabelsAndBindings(); }
-
-        // The REAL road: mirror the pad state into Android joystick/key
-        // events so Unity's legacy stream (and InControl's own
-        // UnityInputDeviceManager) sees a controller like any physical one.
-        if (visible && deviceAttached && Time.frameCount % 2 == 0)
-            JoystickInjector.Push(device.Stick.x, device.Stick.y,
-                device.Buttons[0], device.Buttons[1], device.Buttons[2], device.Buttons[3],
-                device.Buttons[6], device.Buttons[5]);
-
-        // DIAGNOSTIC (debug builds), AFTER routing above. It used to run
-        // BEFORE it: the device is zeroed every frame before routing, so the
-        // snapshot printed btns=0x00 and stick=0.00 REGARDLESS of real input
-        // -- several debug rounds chased that ghost. It also reports the GUI
-        // matrix the pad inherited: the game's own IMGUI sets GUI.matrix, a
-        // matrix persists into later OnGUI callbacks, and a pad drawn under
-        // a foreign matrix lands where its hit test does not look.
-        _diagTimer -= Time.unscaledDeltaTime;
-        if (_diagTimer <= 0f)
-        {
-            _diagTimer = 2f;
-            var mask = 0;
-            for (int i = 0; i < device.Buttons.Length; i++) if (device.Buttons[i]) mask |= 1 << i;
-            var m = GUI.matrix;
-            var dgm = GameManager._instance;
-            var dh = dgm != null ? dgm.inputHandler : null;
-            Debug.Log($"[VPad] gs={(int)gm_GameState()} vis={visible} incl={includedDevices} " +
-                $"gm={dgm != null} h={dh != null} a={dh != null && dh.inputActions != null} incTries={includeTries} " +
-                $"attached={deviceAttached} setActions={actionsSet} stick={device.Stick.x:F2},{device.Stick.y:F2} " +
-                $"btns=0x{mask:X2} fingers={stickFinger},{string.Join(",", buttonFinger)} " +
-                $"mat={m.m00:F2},{m.m03:F1},{m.m11:F2},{m.m13:F1}");
-        }
+    void EnsureAttached()
+    {
+        if (device == null || !InputManager.IsSetup || device.IsAttached) return;
+        InputManager.AttachDevice(device);
+        // Makes the attach visible to InputHandler.Setup even when the event
+        // fired before it subscribed, and flips ActiveDevice immediately.
+        device.RequestActivation();
+        if (Verbose)
+            Debug.Log($"[VPad] attached \"{device.Name}\" devices={InputManager.Devices.Count} " +
+                      $"active=\"{InputManager.ActiveDevice.Name}\"");
     }
 
     void OnDestroy()
     {
-        if (deviceAttached) InputManager.DetachDevice(device);
+        if (device != null && InputManager.IsSetup && device.IsAttached)
+            InputManager.DetachDevice(device);
+    }
+
+    // ── visibility ─────────────────────────────────────────────────────────
+
+    void UpdateVisibility()
+    {
+        var gm = GameManager._instance;
+        var state = gm != null ? gm.GameState : global::GlobalEnums.GameState.INACTIVE;
+        bool inventory = PlayerData.HasInstance && PlayerData.instance.isInventoryOpen;
+        bool paused = gm != null && gm.isPaused;
+        bool playingNow = gm != null && state == global::GlobalEnums.GameState.PLAYING && !paused;
+        if (playingNow) lastPlayingTime = Time.unscaledTime;
+
+        // Short hold across ENTERING_LEVEL so a scene transition does not
+        // blink the pad; pause and menus hide it immediately.
+        bool transitioning = gm != null &&
+            state == global::GlobalEnums.GameState.ENTERING_LEVEL &&
+            (Time.unscaledTime - lastPlayingTime) < 0.5f;
+
+        PadMode next;
+        if (inventory && gm != null) next = PadMode.Inventory;
+        else if (playingNow || transitioning) next = PadMode.Play;
+        else next = PadMode.Hidden;
+
+        if (next == mode) return;
+        ReleaseAll();
+        if (Verbose)
+            Debug.Log($"[VPad] mode={next} state={state} paused={paused} inventory={inventory}");
+        mode = next;
+    }
+
+    void ReleaseAll()
+    {
+        stickFinger = -1;
+        stickOrigin = Vector2.zero;
+        stickKnob = Vector2.zero;
+        for (int i = 0; i < ButtonCount; i++) buttonFinger[i] = -1;
+        device.SetInput(Vector2.zero, 0);
     }
 
     // ── touch routing ──────────────────────────────────────────────────────
 
-    void RouteTouches()
+    static Vector2 ToGui(Vector2 position) => new Vector2(position.x, Screen.height - position.y);
+
+    void RoutePlayTouches()
     {
         var touches = Input.touches;
 
@@ -388,40 +312,34 @@ public class VirtualPad : MonoBehaviour
         for (int i = 0; i < touches.Length; i++)
         {
             var t = touches[i];
-            var gui = new Vector2(t.position.x, Screen.height - t.position.y);
+            var gui = ToGui(t.position);
 
             if (t.fingerId == stickFinger)
             {
-                if (t.phase == TouchPhase.Moved && Time.frameCount % 30 == 0)
-                    LogTouch("moved-sample", t);
-                if (t.phase == TouchPhase.Began) LogTouch("stick-held-begin", t);
                 if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
                 {
                     stickFinger = -1;
                     stickOrigin = Vector2.zero;
+                    stickKnob = Vector2.zero;
                     continue;
                 }
                 UpdateKnob(gui);
             }
 
-            for (int b = 0; b < buttonFinger.Length; b++)
+            for (int b = 0; b < ButtonCount; b++)
             {
                 if (t.fingerId != buttonFinger[b]) continue;
-                if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled ||
-                    !InsideButton(b, gui))
-                {
+                if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled || !Hit(b, gui))
                     buttonFinger[b] = -1;
-                }
             }
         }
 
-        // New touches pick their role by zone; held fingers are matched above.
+        // New touches pick their role by zone; held fingers were matched above.
         for (int i = 0; i < touches.Length; i++)
         {
             var t = touches[i];
             if (t.phase != TouchPhase.Began) continue;
-            var gui = new Vector2(t.position.x, Screen.height - t.position.y);
-            LogTouch("new-touch", t);
+            var gui = ToGui(t.position);
 
             if (stickFinger == -1 && InStickZone(gui))
             {
@@ -430,10 +348,10 @@ public class VirtualPad : MonoBehaviour
                 UpdateKnob(gui);
                 continue;
             }
-            for (int b = 0; b < buttonFinger.Length; b++)
+            for (int b = 0; b < ButtonCount; b++)
             {
                 if (buttonFinger[b] != -1) continue;
-                if (InsideButton(b, gui))
+                if (Hit(b, gui))
                 {
                     buttonFinger[b] = t.fingerId;
                     break;
@@ -441,30 +359,80 @@ public class VirtualPad : MonoBehaviour
             }
         }
 
-        // Settle device state from whatever fingers are held.
+        int mask = 0;
+        bool anyInput = false;
+        for (int b = 0; b < ButtonCount; b++)
+        {
+            if (buttonFinger[b] == -1) continue;
+            mask |= 1 << b;
+            anyInput = true;
+        }
+        var stick = Vector2.zero;
         if (stickFinger != -1)
         {
-            device.Stick = Vector2.ClampMagnitude(stickKnob, 1f);
+            stick = Vector2.ClampMagnitude(stickKnob, 1f);
+            anyInput = true;
         }
-        for (int b = 0; b < device.Buttons.Length; b++)
-        {
-            device.Buttons[b] = buttonFinger[b] != -1;
-        }
+        device.SetInput(stick, mask);
+        if (anyInput) device.RequestActivation();
     }
 
-    void LogTouch(string where, UnityEngine.Touch t)
+    static readonly int[] InventorySlots =
     {
-        // One line per touch EVENT during the debug session: routes are
-        // decided here and this names every decision with coordinates.
-        var gui = new Vector2(t.position.x, Screen.height - t.position.y);
-        Debug.Log($"[VPadT] {where} id={t.fingerId} phase={t.phase} gui={gui.x:F0},{gui.y:F0} " +
-            $"zone={(InStickZone(gui) ? "stick" : "other")}");
+        (int)PadButton.Inventory,   // Exit: Select closes the inventory
+        (int)PadButton.Map,         // Pane left: LeftBumper
+        (int)PadButton.Throw,       // Pane right: RightBumper
+    };
+
+    /** Inventory owns the screen; only exit and pane arrows route here. */
+    void RouteInventoryTouches()
+    {
+        var touches = Input.touches;
+
+        for (int i = 0; i < touches.Length; i++)
+        {
+            var t = touches[i];
+            var gui = ToGui(t.position);
+            for (int k = 0; k < InventorySlots.Length; k++)
+            {
+                int b = InventorySlots[k];
+                if (t.fingerId != buttonFinger[b]) continue;
+                if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled || !Hit(b, gui))
+                    buttonFinger[b] = -1;
+            }
+        }
+
+        for (int i = 0; i < touches.Length; i++)
+        {
+            var t = touches[i];
+            if (t.phase != TouchPhase.Began) continue;
+            var gui = ToGui(t.position);
+            for (int k = 0; k < InventorySlots.Length; k++)
+            {
+                int b = InventorySlots[k];
+                if (buttonFinger[b] != -1) continue;
+                if (!Hit(b, gui)) continue;
+                buttonFinger[b] = t.fingerId;
+                break;
+            }
+        }
+
+        int mask = 0;
+        bool anyInput = false;
+        for (int k = 0; k < InventorySlots.Length; k++)
+        {
+            int b = InventorySlots[k];
+            if (buttonFinger[b] == -1) continue;
+            mask |= 1 << b;
+            anyInput = true;
+        }
+        device.SetInput(Vector2.zero, mask);
+        if (anyInput) device.RequestActivation();
     }
 
     void UpdateKnob(Vector2 guiPos)
     {
-        var vmin = Mathf.Min(Screen.width, Screen.height);
-        var max = KNOB_RANGE * STICK_RING_R * vmin;
+        var max = KNOB_RANGE * STICK_RING_R * vmin();
         var delta = guiPos - stickOrigin;
         var clamped = Vector2.ClampMagnitude(delta, max);
         // GUI Y grows downward; the device expects stick-up as positive.
@@ -477,178 +445,114 @@ public class VirtualPad : MonoBehaviour
                guiPos.y > (1f - STICK_ZONE_H) * Screen.height;
     }
 
-    Vector2 ButtonCentre(int b)
-    {
-        var cx = CLUSTER_CX * Screen.width;
-        var cy = CLUSTER_CY * Screen.height;
-        var off = DIAMOND_R * Mathf.Min(Screen.width, Screen.height);
-        switch ((PadButton)b)
-        {
-            case PadButton.Jump: return new Vector2(cx + off, cy);          // right
-            case PadButton.Attack: return new Vector2(cx - off, cy);        // left
-            case PadButton.Cast: return new Vector2(cx, cy + off);          // below
-            case PadButton.DreamNail: return new Vector2(cx, cy - off);     // above
-            case PadButton.Dash: return new Vector2(PILL_DASH_CX * Screen.width, PILL_CY * vmin());
-            case PadButton.SuperDash: return new Vector2(PILL_SUPER_CX * Screen.width, PILL_CY * vmin());
-            case PadButton.Map: return new Vector2(PILL_MAP_CX * Screen.width, PILL_CY * vmin());
-            default: return new Vector2(PILL_INV_CX * Screen.width, PILL_CY * vmin());
-        }
-    }
+    // ── geometry: one source for draw and hit-test ─────────────────────────
 
     static float vmin() => Mathf.Min(Screen.width, Screen.height);
 
-    bool InsideButton(int b, Vector2 guiPos)
+    static bool IsPill(int slot) => slot >= (int)PadButton.Map;
+
+    Vector2 ButtonCentre(int slot)
     {
-        var c = ButtonCentre(b);
-        if ((PadButton)b >= PadButton.Dash)
+        var cx = CLUSTER_CX * Screen.width;
+        var cy = CLUSTER_CY * Screen.height;
+        var off = DIAMOND_R * vmin();
+        switch ((PadButton)slot)
         {
-            var w = PILL_W * Screen.width;
-            var h = PILL_H * vmin();
-            return new Rect(c.x - w * 0.5f, c.y - h * 0.5f, w, h).Contains(guiPos);
+            case PadButton.Cast: return new Vector2(cx + off, cy);          // right
+            case PadButton.Attack: return new Vector2(cx - off, cy);        // left
+            case PadButton.Jump: return new Vector2(cx, cy + off);          // below
+            case PadButton.DreamNail: return new Vector2(cx, cy - off);     // above
+            case PadButton.Map: return new Vector2(PILL_MAP_CX * Screen.width, PILL_CY * vmin());
+            case PadButton.Inventory: return new Vector2(PILL_INV_CX * Screen.width, PILL_CY * vmin());
+            case PadButton.Throw: return new Vector2(PILL_THROW_CX * Screen.width, PILL_CY * vmin());
+            case PadButton.Pause: return new Vector2(PILL_PAUSE_CX * Screen.width, PILL_PAUSE_CY * vmin());
+            default: return Vector2.zero;
         }
-        var r = FACE_R * vmin();
-        return (guiPos - c).sqrMagnitude <= r * r;
     }
 
-    // ── labels and bindings, refreshed ~1Hz ─────────────────────────────────
+    static Rect Centered(float cx, float cy, float w, float h) =>
+        new Rect(cx - w * 0.5f, cy - h * 0.5f, w, h);
 
-    void RefreshLabelsAndBindings()
+    Rect InventoryRect(int slot)
+    {
+        var w = INV_W * Screen.width;
+        var h = INV_H * vmin();
+        if (slot == (int)PadButton.Inventory)
+            return Centered(INV_EXIT_CX * Screen.width, INV_EXIT_CY * vmin(), w, h);
+        if (slot == (int)PadButton.Map)
+            return Centered(INV_LEFT_CX * Screen.width, INV_ARROW_CY * vmin(), w, h);
+        return Centered(INV_RIGHT_CX * Screen.width, INV_ARROW_CY * vmin(), w, h);
+    }
+
+    Rect ButtonRect(int slot)
+    {
+        if (mode == PadMode.Inventory) return InventoryRect(slot);
+        var c = ButtonCentre(slot);
+        if (slot == (int)PadButton.Pause)
+            return Centered(c.x, c.y, PILL_PAUSE_W * Screen.width, PILL_PAUSE_H * vmin());
+        if (IsPill(slot))
+            return Centered(c.x, c.y, PILL_W * Screen.width, PILL_H * vmin());
+        var r = FACE_R * vmin();
+        return new Rect(c.x - r, c.y - r, r * 2f, r * 2f);
+    }
+
+    bool Hit(int slot, Vector2 guiPos) => ButtonRect(slot).Contains(guiPos);
+
+    // ── labels, read-only sweep ────────────────────────────────────────────
+
+    void RefreshLabels()
     {
         var gm = GameManager._instance;
-        if (gm == null) return;
-        var handler = gm.inputHandler;
-        if (handler == null) return;
-        var actions = handler.inputActions;
+        var handler = gm != null ? gm.inputHandler : null;
+        var actions = handler != null ? handler.inputActions : null;
         if (actions == null) return;
 
-        // THE HAMMER, now aimed correctly. PlayerActionSet.Update reads
-        // `Device ?? FindActiveDevice()` — the SET's cached Device, assigned
-        // ONCE when the game creates the set, before this device exists.
-        // Non-null forever: FindActiveDevice (and the include list with it)
-        // is UNREACHABLE at runtime, so the old include-only hammer sat
-        // aimed at a code path that never runs (ref/PAS.txt:139, :105). The
-        // real controller arrives earlier and reaches the same state through
-        // attach events; we arrive late, so assign the set explicitly.
-        // Verified public setter: ref/PAS.txt:35, PlayerActionSet.Device.
-        includeTries++;
-        try { actions.Device = device; actionsSet = true; } catch (Exception) { }
-        // Belt and braces: if the game later nulls or rebuilds the set, the
-        // include list keeps feeding FindActiveDevice the same device.
-        try { if (!actions.IncludeDevices.Contains(device)) actions.IncludeDevices.Add(device); includedDevices = true; } catch (Exception) { }
-        for (int i = 0; i < Defaults.Length; i++)
+        LabelFor(actions.Jump, "Jump");
+        LabelFor(actions.Cast, "Cast");
+        LabelFor(actions.Attack, "Attack");
+        LabelFor(actions.DreamNail, "Dream");
+        LabelFor(actions.QuickCast, "Throw");
+        LabelFor(actions.QuickMap, "Map");
+        LabelFor(actions.OpenInventory, "Inventory");
+    }
+
+    void LabelFor(PlayerAction action, string label)
+    {
+        if (action == null) return;
+        var bindings = action.UnfilteredBindings;
+        if (bindings == null) return;
+        for (int i = 0; i < bindings.Count; i++)
         {
-            var entry = Defaults[i];
-            var action = GetAction(actions, entry.key);
-            if (action == null) continue;
-
-            // THE BINDING: added when missing, whatever is attached. With a
-            // pad connected the game has bound the same control already and
-            // this is a read; with none, it is what lets the touch device be
-            // read at all.
-            if (!HasControl(action, entry.target))
-                action.AddBinding(new DeviceBindingSource(entry.target));
-
-            // THE LABEL: live binding wins; the default name is the fallback.
-            var slot = SlotForControl(entry.target);
-            var label = FindLiveLabel(actions, entry.target) ?? entry.label;
-            if (slot >= 0 && labels[slot] != label)
-            {
-                labels[slot] = label;
-                labelContent[slot] = new GUIContent(label);
-            }
+            if (!(bindings[i] is DeviceBindingSource source)) continue;
+            int slot = SlotForControl(source.Control);
+            if (slot >= 0) SetLabel(slot, label);
         }
     }
 
-    /** Which pad slot is drawn for this control, or -1. */
-    static int SlotForControl(InputControlType target)
+    static int SlotForControl(InputControlType control)
     {
         for (int i = 0; i < Targets.Length; i++)
-            if (Targets[i] == target) return i;
+            if (Targets[i] == control) return i;
         return -1;
     }
 
-    static string FindLiveLabel(HeroActions actions, InputControlType target)
+    void SetLabel(int slot, string text)
     {
-        var pairs = new (string key, PlayerAction action)[]
-        {
-            ("jump", actions.Jump),
-            ("attack", actions.Attack),
-            ("cast", actions.Cast),
-            ("dreamNail", actions.DreamNail),
-            ("superDash", actions.SuperDash),
-            ("dash", actions.Dash),
-            ("quickCast", actions.QuickCast),
-            ("quickMap", actions.QuickMap),
-            ("openInventory", actions.OpenInventory),
-            ("taunt", actions.Taunt),
-        };
-        for (int i = 0; i < pairs.Length; i++)
-        {
-            if (pairs[i].action == null) continue;
-            if (HasControl(pairs[i].action, target))
-            {
-                switch (pairs[i].key)
-                {
-                    case "jump": return "Jump";
-                    case "attack": return "Attack";
-                    case "cast": return "Cast";
-                    case "dreamNail": return "Dream Nail";
-                    case "superDash": return "Super Dash";
-                    case "dash": return "Dash";
-                    case "quickCast": return "Quick Cast";
-                    case "quickMap": return "Map";
-                    case "openInventory": return "Inventory";
-                    case "taunt": return "Taunt";
-                }
-            }
-        }
-        return null;
-    }
-
-    static PlayerAction GetAction(HeroActions actions, string key)
-    {
-        switch (key)
-        {
-            case "jump": return actions.Jump;
-            case "attack": return actions.Attack;
-            case "cast": return actions.Cast;
-            case "dreamNail": return actions.DreamNail;
-            case "superDash": return actions.SuperDash;
-            case "dash": return actions.Dash;
-            case "quickCast": return actions.QuickCast;
-            case "quickMap": return actions.QuickMap;
-            case "openInventory": return actions.OpenInventory;
-            case "moveLeft": return actions.Left;
-            case "moveRight": return actions.Right;
-            case "moveUp": return actions.Up;
-            case "moveDown": return actions.Down;
-            case "taunt": return actions.Taunt;
-            default: return null;
-        }
-    }
-
-    static bool HasControl(PlayerAction action, InputControlType target)
-    {
-        var bindings = action.UnfilteredBindings;
-        if (bindings == null) return false;
-        for (int i = 0; i < bindings.Count; i++)
-        {
-            if (bindings[i] is DeviceBindingSource src && src.Control == target) return true;
-        }
-        return false;
+        if (labels[slot] == text) return;
+        labels[slot] = text;
+        labelContent[slot].text = text;
     }
 
     // ── drawing ────────────────────────────────────────────────────────────
 
-    Texture2D CircleTexture()
+    /** Dark disc with a white border ring; brighter fill while held. */
+    Texture2D CircleTexture(bool held)
     {
-        if (ringTex != null) return ringTex;
-        // A flat disc under a solid border ring — the shape real controller
-        // buttons have, instead of the radial ball-shading the first texture
-        // had (alpha = 1 - dist² rendered every control as a glowing sphere).
+        var tex = held ? circleHeld : circleRest;
+        if (tex != null) return tex;
         const int size = 96;
-        ringTex = new Texture2D(size, size, TextureFormat.ARGB32, false);
-        ringTex.wrapMode = TextureWrapMode.Clamp;
+        tex = new Texture2D(size, size, TextureFormat.ARGB32, false);
+        tex.wrapMode = TextureWrapMode.Clamp;
         var px = new Color32[size * size];
         var c = (size - 1) / 2f;
         for (int y = 0; y < size; y++)
@@ -656,109 +560,138 @@ public class VirtualPad : MonoBehaviour
             for (int x = 0; x < size; x++)
             {
                 var dist = Mathf.Sqrt((x - c) * (x - c) + (y - c) * (y - c)) / c;
-                byte a;
-                if (dist > 0.94f) a = 0;               // outside
-                else if (dist > 0.78f) a = 235;        // the border ring
-                else a = 38;                           // faint fill inside
-                px[y * size + x] = new Color32(255, 255, 255, a);
+                Color32 col;
+                if (dist > 0.95f) col = new Color32(0, 0, 0, 0);
+                else if (dist > 0.80f) col = new Color32(255, 255, 255, held ? (byte)255 : (byte)220);
+                else col = held ? new Color32(255, 255, 255, 70) : new Color32(0, 0, 0, 110);
+                px[y * size + x] = col;
             }
         }
-        ringTex.SetPixels32(px);
-        ringTex.Apply(false, true);
-        return ringTex;
+        tex.SetPixels32(px);
+        tex.Apply(false, true);
+        if (held) circleHeld = tex; else circleRest = tex;
+        return tex;
+    }
+
+    /** Rounded rectangle with the same treatment, drawn at a 3:1 aspect. */
+    Texture2D PillTexture(bool held)
+    {
+        var tex = held ? pillHeld : pillRest;
+        if (tex != null) return tex;
+        const int w = 192, h = 64;
+        const float radius = 30f, border = 3f;
+        tex = new Texture2D(w, h, TextureFormat.ARGB32, false);
+        tex.wrapMode = TextureWrapMode.Clamp;
+        var px = new Color32[w * h];
+        var cx = (w - 1) / 2f;
+        var cy = (h - 1) / 2f;
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                var dx = Mathf.Abs(x - cx) - (w * 0.5f - radius);
+                var dy = Mathf.Abs(y - cy) - (h * 0.5f - radius);
+                var outside = Mathf.Sqrt(Mathf.Max(dx, 0f) * Mathf.Max(dx, 0f) +
+                                         Mathf.Max(dy, 0f) * Mathf.Max(dy, 0f));
+                var dist = outside + Mathf.Min(Mathf.Max(dx, dy), 0f) - radius;
+                Color32 col;
+                if (dist > 0f) col = new Color32(0, 0, 0, 0);
+                else if (dist > -border) col = new Color32(255, 255, 255, held ? (byte)255 : (byte)220);
+                else col = held ? new Color32(255, 255, 255, 70) : new Color32(0, 0, 0, 110);
+                px[y * w + x] = col;
+            }
+        }
+        tex.SetPixels32(px);
+        tex.Apply(false, true);
+        if (held) pillHeld = tex; else pillRest = tex;
+        return tex;
     }
 
     void RefreshStylesIfNeeded()
     {
-        if (labelStyle != null && styleScreenWidth == Screen.width &&
+        if (pillStyle != null && styleScreenWidth == Screen.width &&
             styleScreenHeight == Screen.height) return;
         styleScreenWidth = Screen.width;
         styleScreenHeight = Screen.height;
-        labelStyle = new GUIStyle(GUI.skin.label)
+
+        var baseStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize = (int)(17f + 14f * Mathf.Min(Screen.width, Screen.height) / 1080f),
+            fontSize = (int)(17f + 14f * vmin() / 1080f),
             alignment = TextAnchor.MiddleCenter,
             clipping = TextClipping.Overflow,
         };
+        pillStyle = new GUIStyle(baseStyle);
+        faceStyle = new GUIStyle(baseStyle)
+        {
+            fontSize = Mathf.Max(10, (int)(FACE_R * vmin() * 2f * 0.22f)),
+        };
+    }
+
+    void DrawButton(int slot, GUIContent content, Color restTint, Color heldTint)
+    {
+        var rect = ButtonRect(slot);
+        bool pressed = buttonFinger[slot] != -1;
+        GUI.color = pressed ? heldTint : restTint;
+        GUI.DrawTexture(rect, IsPill(slot) ? PillTexture(pressed) : CircleTexture(pressed));
+
+        if (content.text.Length > 0)
+        {
+            var style = IsPill(slot) ? pillStyle : faceStyle;
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.Label(new Rect(rect.x, rect.y + 1.5f, rect.width, rect.height), content, style);
+            GUI.color = Color.white;
+            GUI.Label(rect, content, style);
+        }
     }
 
     void OnGUI()
     {
-        // A foreign GUI.matrix (the game's own IMGUI leaves one behind; Unity
-        // does not reset it between callbacks) shifts EVERYTHING drawn here
-        // while the hit test keeps pure screen math -- drawn diamonds at
-        // 0.645w when the test looks at 0.845w, and per-frame jitter between
-        // the two = the flicker. Identity first, inheritance logged.
-        var inheritedMatrix = GUI.matrix;
+        // The game's own IMGUI can leave a matrix behind; draw and hit-test
+        // both use raw screen coordinates, so start from identity.
         GUI.matrix = Matrix4x4.identity;
-        if (Time.frameCount % 90 == 0)
-            Debug.Log($"[VPadm] mat0={inheritedMatrix.m00:F2},{inheritedMatrix.m03:F1}," +
-                $"{inheritedMatrix.m11:F2},{inheritedMatrix.m13:F1}");
-
-        if (!visible) return;
+        if (mode == PadMode.Hidden) return;
         RefreshStylesIfNeeded();
 
-        // Bindings + labels refresh at ~1Hz.
+        var restTint = new Color(1f, 1f, 1f, 0.92f);
+        var heldTint = Color.white;
 
-        var tex = CircleTexture();
+        if (mode == PadMode.Inventory)
+        {
+            DrawButton((int)PadButton.Inventory, invExitContent, restTint, heldTint);
+            DrawButton((int)PadButton.Map, invLeftContent, restTint, heldTint);
+            DrawButton((int)PadButton.Throw, invRightContent, restTint, heldTint);
+            GUI.color = Color.white;
+            return;
+        }
+
         var vminNow = vmin();
-        var rest = new Color(1f, 1f, 1f, 0.9f);
-        var held = new Color(1f, 1f, 1f, 1f);
 
-        // The resting ring marks the zone even untouched: hidden buttons are
-        // undiscoverable, which was the first build's other problem.
+        // Resting ring marks the stick zone even untouched.
         if (stickFinger == -1)
         {
             var restCentre = new Vector2(STICK_REST_X * Screen.width,
                 Screen.height - STICK_REST_Y * Screen.height);
-            GUI.color = rest;
+            GUI.color = restTint;
             GUI.DrawTexture(new Rect(restCentre.x - STICK_RING_R * vminNow, restCentre.y - STICK_RING_R * vminNow,
-                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), tex);
+                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), CircleTexture(false));
         }
-
-        if (stickFinger != -1)
+        else
         {
             var origin = stickOrigin;
-            GUI.color = held;
+            GUI.color = heldTint;
             GUI.DrawTexture(new Rect(origin.x - STICK_RING_R * vminNow, origin.y - STICK_RING_R * vminNow,
-                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), tex);
+                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), CircleTexture(false));
             var knob = new Vector2(origin.x + stickKnob.x * KNOB_RANGE * STICK_RING_R * vminNow,
                                    origin.y - stickKnob.y * KNOB_RANGE * STICK_RING_R * vminNow);
             GUI.DrawTexture(new Rect(knob.x - STICK_RING_R * 0.55f * vminNow, knob.y - STICK_RING_R * 0.55f * vminNow,
-                STICK_RING_R * 1.1f * vminNow, STICK_RING_R * 1.1f * vminNow), tex);
+                STICK_RING_R * 1.1f * vminNow, STICK_RING_R * 1.1f * vminNow), CircleTexture(true));
         }
 
-        // ALL EIGHT roles, Map and Inventory included: the loop used to stop
-        // at 6, so those two pills were committed, routable and clickable
-        // invisibly -- the pixel evidence (two screenshots) and the code
-        // agree; a pill that exists but not on screen is a trap.
-        for (int b = 0; b < 8; b++)
-        {
-            var centre = ButtonCentre(b);
-            bool isPill = (PadButton)b >= PadButton.Dash;
-            GUI.color = buttonFinger[b] != -1 ? held : rest;
+        for (int b = 0; b < ButtonCount; b++)
+            DrawButton(b, labelContent[b], restTint, heldTint);
 
-            Rect rect;
-            if (isPill)
-            {
-                var w = PILL_W * Screen.width;
-                var h = PILL_H * vminNow;
-                rect = new Rect(centre.x - w * 0.5f, centre.y - h * 0.5f, w, h);
-            }
-            else
-            {
-                var r = FACE_R * vminNow * 0.96f;
-                rect = new Rect(centre.x - r, centre.y - r, r * 2f, r * 2f);
-            }
-            GUI.DrawTexture(rect, tex);
-            var content = labelContent[b];
-            if (content.text.Length > 0)
-            {
-                var scaled = new GUIStyle(labelStyle);
-                if (!isPill) scaled.fontSize = (int)(rect.height * 0.25f);
-                GUI.Label(rect, content, scaled);
-            }
-        }
         GUI.color = Color.white;
     }
 }
+
+#endif

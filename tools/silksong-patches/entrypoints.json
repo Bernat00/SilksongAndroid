@@ -42,7 +42,6 @@
     { "className": "AndroidRumble", "methodName": "Bootstrap", "loadTypes": 0 },
     { "className": "InputProbe", "methodName": "Bootstrap", "loadTypes": 0 },
     { "className": "ControllerAliases", "methodName": "Bootstrap", "loadTypes": 0 },
-    { "className": "KeepScreenOn", "methodName": "Bootstrap", "loadTypes": 0 },
     { "className": "VirtualPad", "methodName": "Bootstrap", "loadTypes": 0 }
   ]
 }

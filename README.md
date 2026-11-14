@@ -25,19 +25,38 @@ Steam integration for game files and cloud saves.
 - **QoL settings**: Skip intro, set resolution, auto upload/download cloud saves etc.
 - **Any device**: Any Android device works, single screen as well.
 
+## Experimental features (very vibe-coded)
+
+The **GOG sign-in / cloud saves** integration and the **on-screen touch controls**
+are experimental and very vibe-coded. They are built against undocumented
+behaviour and may break, lose settings, or need a rebuild when the game or the
+services change. Treat them as conveniences, not guarantees. The core path
+(Steam/manual game files plus the on-device build) is the stable part.
+
 ## Setup
 
 1. Download the latest APK from
-   [Releases](https://github.com/jakobkhansen/SilksongAndroid/releases/latest)
-   and install it.
+   [Releases](https://github.com/Bernat00/SilksongAndroid/releases/latest)
+   and install it (allow installs from your browser/file manager if Android
+   asks). The APK contains no game data; it builds the game on the device from
+   files you supply.
 2. Supply your own game files. Either copy them across from your PC yourself,
-   or let the app fetch them for you by signing in to Steam.
+   or let the app fetch them for you by signing in to Steam. GOG sign-in is also
+   supported for cloud saves.
 3. Press the button. The app fetches everything it needs and builds the game.
-   The build takes 20–30 minutes on a Snapdragon 8 Gen 2.
+   The build takes 20–30 minutes on a Snapdragon 8 Gen 2; on mid-range devices
+   expect longer, and leave the phone idle while it runs.
 4. Play!
 
-Any device should do (tested on the AYN Thor and the Retroid Pocket Flip 2). Open an issue
-if your device doesn't work.
+**Recommended device requirements:** Android 8.0 or newer on arm64 with Vulkan.
+The on-device IL2CPP build peaks at roughly 3 GB of RAM, so **8 GB RAM is
+recommended** (4–6 GB devices may take hours or run out of memory) and about
+**25 GB of free storage** is needed for the Linux depot plus the build output.
+The APK is signed with a debug key; if you are updating from a build signed with
+a different key, uninstall the old app first.
+
+Any device should do (tested on the AYN Thor, the Retroid Pocket Flip 2 and a
+Samsung S23+). Open an issue if your device doesn't work.
 
 ### Supplying the game files yourself
 

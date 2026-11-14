@@ -809,6 +809,10 @@ class LauncherActivity : Activity() {
             // resume of the still-living launcher.
             val intent = Intent().apply {
                 setClassName(packageName, UNITY_ACTIVITY_CLASS)
+                // The game window belongs to the shell activity, which the
+                // C# side cannot reach reliably. Hand the screen-on setting
+                // across with the launch instead.
+                putExtra("keep_screen_on", settings.keepScreenOn)
             }
             // Written here rather than when the user changes a setting: this
             // is the moment the game will read them, so it is the moment they

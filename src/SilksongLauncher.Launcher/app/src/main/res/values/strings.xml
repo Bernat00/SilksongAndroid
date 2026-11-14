@@ -37,7 +37,7 @@
     <string name="settings_keep_screen_on">Keep the screen on while playing</string>
     <string name="settings_keep_screen_on_subtitle">When you are holding a controller instead of the phone, the screen otherwise dims on its own timer. Takes effect on the next game launch.</string>
     <string name="settings_touch_overlay">On-screen controls</string>
-    <string name="settings_touch_overlay_subtitle">A thumb pad for games played without a controller: move stick on the left, jump/cast/attack/dream-nail on the right, dash and super-dash pills above. Labels follow your button bindings. Hides while a controller is in use. Takes effect on the next game launch.</string>
+    <string name="settings_touch_overlay_subtitle">A thumb pad for games played without a controller: move stick on the left, jump/cast/attack/dream-nail on the right, dash and super-dash pills above. Labels follow your button bindings. Works alongside a connected controller — the controller takes over the moment you use it. Takes effect on the next game launch.</string>
     <string name="settings_gog_sign_in">Sign in to GOG</string>
     <string name="settings_gog_sign_out">Sign out of GOG</string>
     <string name="settings_gog_signed_in">GOG: signed in (cloud saves available)</string>

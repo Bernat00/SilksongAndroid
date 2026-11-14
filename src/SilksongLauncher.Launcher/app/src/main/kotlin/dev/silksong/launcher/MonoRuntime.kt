@@ -191,6 +191,7 @@ object MonoRuntime {
             // 1024 MB there meant GC thrash that burned 4 cores at 100% for
             // 15 minutes producing 0 files (the "stuck at 0%" report).
             heapMb <= 0 -> Budget(cores.coerceAtMost(6), 1792)
+            heapMb > 1792 -> Budget(cores.coerceAtMost(6), 1792)
             cores <= 1 && heapMb <= FLOOR_HEAP_MB -> null
             else -> Budget((cores / 2).coerceAtLeast(1), (heapMb / 2).coerceAtLeast(FLOOR_HEAP_MB))
         }
@@ -248,7 +249,13 @@ object MonoRuntime {
             // Unknown is treated as roomy: a device that will not answer the
             // question is not evidence that it is small, and capping every
             // such device would slow builds that were never in trouble.
-            total <= 0L || gb >= 6.6 -> Budget(cores, 0)
+            total <= 0L -> Budget(cores, 0)
+            // A 7 GB phone is not a 7 GB desktop: Android holds three to four
+            // gigabytes, so an unlimited il2cpp heap peaks around 3.3 GB and
+            // the low-memory killer reclaims it near the end of the run. 2.5 GB
+            // stays under that peak without dropping to the 1792 MB tier,
+            // where SGen thrashes and the first ten minutes produce no files.
+            gb >= 6.6 -> Budget(cores, 2560)
             gb >= 5.2 -> Budget(cores.coerceAtMost(4), 1024)
             gb >= 3.2 -> Budget(cores.coerceAtMost(2), 640)
             else -> Budget(1, FLOOR_HEAP_MB)
