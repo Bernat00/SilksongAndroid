@@ -691,7 +691,18 @@ class LauncherActivity : Activity() {
             val tokens = GogAuth.loadTokens(this)
             if (tokens == null || depot == null) return true
             LauncherLog.log("GOG ($source pull): analyzing cloud vs local saves…")
-            val plan = GogSync.analyze(this, depot, tokens, mode = "pull") ?: return true
+            val plan = GogSync.analyze(this, depot, tokens, mode = "pull") ?: run {
+                // A null plan used to return true SILENTLY -- with every
+                // branch inside analyze itself already logged, silence here
+                // meant "the plan builder never reached any branch we know
+                // about", which is exactly the report of a dead button.
+                LauncherLog.log("GOG pull: analyze returned no plan")
+                return true
+            }
+            LauncherLog.log(
+                "GOG pull: plan ready (download ${plan.download.size}, " +
+                    "conflict ${plan.conflictFiles.size}, upload ${plan.upload.size}, " +
+                    "direction=${plan.direction})")
             var choice: GogSync.Choice? = null
             if (plan.conflictFiles.isNotEmpty()) {
                 val steamChoice = confirmConflictResolution(
