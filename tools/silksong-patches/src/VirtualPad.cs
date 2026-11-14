@@ -88,6 +88,112 @@ public class VirtualPad : MonoBehaviour
 {
     enum PadButton { Jump = 0, Cast, Attack, DreamNail, Dash, SuperDash, Map, Inventory }
 
+    /// <summary>
+    /// Feeds the virtual pad into Unity's LEGACY joystick stream as real
+    /// Android input events. This is the road the physical controller takes
+    /// (Android HID -> Unity event queue -> Input.GetJoystickNames/GetAxis/
+    /// GetKey -> InControl's OWN UnityInputDeviceManager -> the game), so
+    /// device creation, attachment, activity and the options-screen verdict
+    /// all come from the game's existing machinery. Events are synthesized
+    /// against a real attached joystick's device id, so name resolution
+    /// succeeds and the same device profile applies; the physical pad keeps
+    /// overriding us the moment the player touches it.
+    /// </summary>
+    static class JoystickInjector
+    {
+        static int joyDeviceId = -1;
+        static float sentLx, sentLy;
+        const int SOURCE_JOYSTICK = 0x1000010;
+        const int BTN_A = 96, BTN_B = 97, BTN_X = 99, BTN_Y = 100;
+        const int BTN_L1 = 102, BTN_R1 = 103, BTN_L2 = 104, BTN_R2 = 105;
+
+        /// Axis/button state to push. Values are InControl-convention (-1..1, Y up).
+        public static void Push(float lx, float ly, bool a, bool b, bool x, bool y, bool l1, bool l2)
+        {
+            ResolveJoystick();
+            if (joyDeviceId < 0) return;
+
+            long now = Now();
+            if (Mathf.Abs(lx - sentLx) > 0.03f || Mathf.Abs(ly - sentLy) > 0.03f)
+            {
+                SendAxes(now, lx, ly);
+                sentLx = lx; sentLy = ly;
+            }
+            Key(BTN_A, a, now);
+            Key(BTN_B, b, now);
+            Key(BTN_X, x, now);
+            Key(BTN_Y, y, now);
+            Key(BTN_L1, l1, now);
+            Key(BTN_L2, l2, now);
+        }
+
+        static void ResolveJoystick()
+        {
+            try
+            {
+                using var devClass = new AndroidJavaClass("android.view.InputDevice");
+                int[] ids = devClass.CallStatic<int[]>("getDeviceIds");
+                if (ids == null) return;
+                for (int i = 0; i < ids.Length; i++)
+                {
+                    using var dev = devClass.CallStatic<AndroidJavaObject>("getDevice", ids[i]);
+                    if (dev == null) continue;
+                    int sources = dev.Call<int>("getSources");
+                    if ((sources & SOURCE_JOYSTICK) != 0 && ids[i] != joyDeviceId)
+                    {
+                        joyDeviceId = ids[i];
+                        Debug.Log("[VPadj] injecting via device id " + joyDeviceId + " (" +
+                                  dev.Call<string>("getName") + ")");
+                    }
+                }
+            }
+            catch (Exception e) { Debug.Log("[VPadj] resolve: " + e.Message); }
+        }
+
+        static void SendAxes(long now, float lx, float ly)
+        {
+            try
+            {
+                using var cls = new AndroidJavaClass("android.view.MotionEvent");
+                using var ev = cls.CallStatic<AndroidJavaObject>("obtain",
+                    now - 50, now, 2 /*ACTION_MOVE*/, lx, ly,
+                    1f /*pressure*/, 1f /*size*/, 0 /*metaState*/,
+                    0.1f, 0.1f, joyDeviceId, 0 /*edgeFlags*/);
+                if (ev == null) return;
+                ev.Call("setSource", SOURCE_JOYSTICK);
+                using var decor = DecorView();
+                if (decor != null) decor.Call<bool>("dispatchGenericMotionEvent", ev);
+            }
+            catch (Exception e) { Debug.Log("[VPadj] axes: " + e.Message); }
+        }
+
+        static void Key(int code, bool down, long now)
+        {
+            try
+            {
+                using var ev = new AndroidJavaObject("android.view.KeyEvent",
+                    now, now, down ? 0 : 1 /*ACTION_DOWN:0 UP:1*/, code, 0, 0, joyDeviceId, 0, 0, SOURCE_JOYSTICK);
+                using var decor = DecorView();
+                if (decor != null) decor.Call<bool>("dispatchKeyEvent", ev);
+            }
+            catch (Exception e) { Debug.Log("[VPadj] key " + code + ": " + e.Message); }
+        }
+
+        static AndroidJavaObject DecorView()
+        {
+            using var unity = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+            using var activity = unity.GetStatic<AndroidJavaObject>("currentActivity");
+            if (activity == null) return null;
+            return activity.Call<AndroidJavaObject>("getWindow").Call<AndroidJavaObject>("getDecorView");
+        }
+
+        static long Now()
+        {
+            using var sys = new AndroidJavaClass("java.lang.System");
+            return sys.CallStatic<long>("currentTimeMillis");
+        }
+    }
+
     // ── layout, as fractions of the screen ──────────────────────────────────
 
     const float CLUSTER_CX = 0.845f;   // face diamond centre, fraction of width
@@ -234,6 +340,14 @@ public class VirtualPad : MonoBehaviour
         // input objects proven present was the smoking gun.
         _refreshTimer -= Time.unscaledDeltaTime;
         if (_refreshTimer <= 0f) { _refreshTimer = 0.5f; RefreshLabelsAndBindings(); }
+
+        // The REAL road: mirror the pad state into Android joystick/key
+        // events so Unity's legacy stream (and InControl's own
+        // UnityInputDeviceManager) sees a controller like any physical one.
+        if (visible && deviceAttached && Time.frameCount % 2 == 0)
+            JoystickInjector.Push(device.Stick.x, device.Stick.y,
+                device.Buttons[0], device.Buttons[1], device.Buttons[2], device.Buttons[3],
+                device.Buttons[6], device.Buttons[5]);
 
         // DIAGNOSTIC (debug builds), AFTER routing above. It used to run
         // BEFORE it: the device is zeroed every frame before routing, so the
