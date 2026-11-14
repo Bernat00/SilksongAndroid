@@ -136,6 +136,7 @@ public class VirtualPad : MonoBehaviour
     float lastPlayingTime = -99f;
     bool includedDevices;
     int includeTries;
+    float _refreshTimer;
 
     GUIStyle labelStyle;
     int styleScreenWidth, styleScreenHeight;
@@ -225,6 +226,14 @@ public class VirtualPad : MonoBehaviour
         visible = (Time.unscaledTime - lastPlayingTime) < 1.5f;
 
         if (visible) RouteTouches();
+
+        // Include/label refresh on its own clock, NOT the draw path: it used
+        // to be called from OnGUI after the visibility gate, so a hidden pad
+        // (menus, load transitions -- or the visibility flicker the user
+        // reports) never wired its own input. incTries=0 with all three
+        // input objects proven present was the smoking gun.
+        _refreshTimer -= Time.unscaledDeltaTime;
+        if (_refreshTimer <= 0f) { _refreshTimer = 0.5f; RefreshLabelsAndBindings(); }
 
         // DIAGNOSTIC (debug builds), AFTER routing above. It used to run
         // BEFORE it: the device is zeroed every frame before routing, so the
@@ -570,7 +579,6 @@ public class VirtualPad : MonoBehaviour
         RefreshStylesIfNeeded();
 
         // Bindings + labels refresh at ~1Hz.
-        if (++labelCooldown >= 60) { labelCooldown = 0; RefreshLabelsAndBindings(); }
 
         var tex = CircleTexture();
         var vminNow = vmin();
