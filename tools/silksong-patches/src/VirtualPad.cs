@@ -407,14 +407,20 @@ public class VirtualPad : MonoBehaviour
         var actions = handler.inputActions;
         if (actions == null) return;
 
-        // THE HAMMER for the "still do nothing" report: PlayerAction binding
-        // sources are normally read from the INPUT SET's active device, and
-        // a device that never got nonzero input before the first press can
-        // lose that race. IncludeDevices pins this device into the set's
-        // polling regardless of arbitration — every action here reads it
-        // directly, every frame, always.
+        // THE HAMMER, now aimed correctly. PlayerActionSet.Update reads
+        // `Device ?? FindActiveDevice()` — the SET's cached Device, assigned
+        // ONCE when the game creates the set, before this device exists.
+        // Non-null forever: FindActiveDevice (and the include list with it)
+        // is UNREACHABLE at runtime, so the old include-only hammer sat
+        // aimed at a code path that never runs (ref/PAS.txt:139, :105). The
+        // real controller arrives earlier and reaches the same state through
+        // attach events; we arrive late, so assign the set explicitly.
+        // Verified public setter: ref/PAS.txt:35, PlayerActionSet.Device.
         includeTries++;
-        try { actions.IncludeDevices.Add(device); includedDevices = true; } catch (Exception) { }
+        try { actions.Device = device; actionsSet = true; } catch (Exception) { }
+        // Belt and braces: if the game later nulls or rebuilds the set, the
+        // include list keeps feeding FindActiveDevice the same device.
+        try { if (!actions.IncludeDevices.Contains(device)) actions.IncludeDevices.Add(device); includedDevices = true; } catch (Exception) { }
         for (int i = 0; i < Defaults.Length; i++)
         {
             var entry = Defaults[i];
