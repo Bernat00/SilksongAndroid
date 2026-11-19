@@ -220,6 +220,13 @@ object UnityDex {
             LauncherLog.log("$TAG: the player classes are not built ($jar is missing)")
             return
         }
+        // Never graft a jar that does not actually contain the player class.
+        // A bad graft cannot be undone in this process, and every later
+        // resolution -- including the repair's probe -- then fails forever.
+        if (!jarProvidesPlayerClasses(context)) {
+            LauncherLog.log("$TAG: not injecting a jar without $UNITY_PLAYER_CLASS")
+            return
+        }
         val appLoader = context.classLoader
         if (appLoader == null) {
             LauncherLog.log("$TAG: no class loader to add the player classes to")
@@ -390,9 +397,14 @@ object UnityDex {
                 outputJar(context).absolutePath,
                 File(context.cacheDir, "$OPT_DIR-probe").apply { mkdirs() }.absolutePath,
                 null,
-                UnityDex::class.java.classLoader,
+                // Boot parent, deliberately. The app loader may hold a stale
+                // graft from startup; parent-first delegation would inherit
+                // its failure and make a good rebuilt jar look bad.
+                null,
             )
             Class.forName(UNITY_PLAYER_CLASS, false, probe)
+        }.onFailure {
+            LauncherLog.log("$TAG: the jar does not provide $UNITY_PLAYER_CLASS", it)
         }.isSuccess
 
     /** Walks up the hierarchy, since the field is declared on a base class. */

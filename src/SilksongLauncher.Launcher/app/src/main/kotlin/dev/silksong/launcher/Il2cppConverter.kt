@@ -450,7 +450,7 @@ object Il2cppConverter {
             }
         }
 
-        var budget = MonoRuntime.budget(context)
+        var budget = MonoRuntime.il2cppBudget(context)
         var result = attempt(budget)
         // Reclaimed rather than failed: the settings were too generous for
         // this device as it stood, so the same work is offered a smaller share

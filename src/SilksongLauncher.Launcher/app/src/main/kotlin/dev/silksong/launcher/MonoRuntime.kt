@@ -263,6 +263,25 @@ object MonoRuntime {
     }
 
     /**
+     * The starting budget for the conversion, not for every tool.
+     *
+     * The SM-S916 family (Galaxy S23+) reliably reaches the end of the 2560 MB
+     * tier and is reclaimed there, so it pays for a full attempt before the
+     * 1792 MB retry. Start at that proven tier on this model instead. The
+     * conversion is slower per file, but one attempt instead of two is faster
+     * overall and does not depend on the OS reclaiming cleanly.
+     */
+    fun il2cppBudget(context: Context): Budget {
+        val base = budget(context)
+        if (Build.MODEL.startsWith("SM-S916", ignoreCase = true)) {
+            val tuned = Budget(base.cores.coerceAtMost(6), 1792)
+            LauncherLog.log("il2cpp: ${Build.MODEL} starts at $tuned (first tier reclaimed on this model)")
+            return tuned
+        }
+        return base
+    }
+
+    /**
      * Runs a .NET program in a builder process and collects what it printed.
      *
      * Deliberately the same shape as Toolchain.exec, and returning the same
@@ -472,7 +491,10 @@ object MonoRuntime {
             out.delete()
             // Read before this, so deleting here rather than after the read
             // is what keeps a cancelled run from leaving one behind.
-            val code = result.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+            // monojni writes the status with %u, so an exit of -1 arrives as
+            // 4294967295. toIntOrNull rejected that and reported FAILED (120),
+            // hiding the real code. Read it as an unsigned 32-bit value.
+            val code = result.takeIf { it.isFile }?.readText()?.trim()?.toLongOrNull()?.toInt()
             result.delete()
             exitCode = code
         }

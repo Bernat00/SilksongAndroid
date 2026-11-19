@@ -1,87 +1,87 @@
-# Session changes — 2026-11-14
+# Session changes — 2026-11-14 → 2026-11-19
 
-Summary of the changes made in this session. Everything below is in the current
-tree; the APK release built from it is `2.0.2`.
+Current source: **2.0.4** (APK built and installed for testing; not yet
+released). Last published release: **v2.0.2**.
 
-## On-screen pad (rewritten)
+## On-screen pad
 
-The previous pad never worked at play time: it threw `IndexOutOfRangeException`
-in three places (arrays sized 6 against 8 controls), so `RouteTouches`,
-the label refresh and `OnGUI` all aborted. On top of that it added no InControl
-controls, so every `UpdateWithState`/`UpdateWithValue` call was a no-op on
-`InputControl.Null`.
+The previous pad never ran at play time: arrays sized 6 against 8 controls threw
+`IndexOutOfRangeException`, and `OnScreenDevice` added no InControl controls, so
+every state call was a no-op on `InputControl.Null`.
 
-- `OnScreenDevice` is now a proper `InputDevice` with every control the game
-  binds created in its constructor: `Action1..Action4`, `LeftBumper`,
-  `RightBumper`, `Select`, `Start`, `RightStickButton` and the left-stick
-  directions. It feeds state only; `InputManager` owns `Commit`.
-- Removed the synthesized Android `MotionEvent`/`KeyEvent` injector. On this
-  build Android uses `NewUnityInputDeviceManager` (Unity Input System), not the
-  legacy `UnityInputDeviceManager`, and the decor-view dispatch bypassed the
-  shell `PlayerActivity`.
-- Removed the `PlayerActionSet.Device` pin, the `IncludeDevices` list and the
-  per-0.5 s binding hammer. Attaching a known device makes the game's own
-  `ControllerAttached`/`ControllerActivated` → `MapControllerButtons` bind the
-  actions, and leaving `PlayerActionSet.Device` null is what keeps the physical
-  controller and the pad arbitrated by `InputManager.ActiveDevice`.
-- Activation uses `RequestActivation()` at attach and on input; idle frames
-  publish zeros, so a physical controller takes over on its next input.
-- Fixed the 6-vs-8 array bugs; all loops and arrays are sized from
-  `OnScreenDevice.ButtonCount`.
-- One `ButtonRect` is now shared by drawing and hit-testing.
+- `OnScreenDevice` is a real `InputDevice` with the controls the game binds:
+  `Action1`, `Action2`, `Action3`, `RightTrigger`, `LeftBumper`, `Select`,
+  `RightBumper`, `Start`, the left stick directions and `RightStickButton`.
+  The manager owns `Commit`; the device only feeds state.
+- Removed the synthesized Android `MotionEvent`/`KeyEvent` injector. Android
+  uses `NewUnityInputDeviceManager` (Unity Input System); the legacy
+  `UnityInputDeviceManager` path is not wired, and decor-view dispatch bypasses
+  the shell.
+- Removed the `PlayerActionSet.Device` pin, `IncludeDevices`, and the 0.5 s
+  `AddBinding` hammer. Attaching a known device lets the game's own
+  `ControllerAttached/Activated -> MapControllerButtons` bind, and
+  `InputManager.ActiveDevice` arbitrates pad vs physical controller.
+- `RequestActivation()` at attach and on input; idle frames publish zeros so a
+  physical controller takes over on its next input.
+- One `ButtonRect` is shared by drawing and hit-testing. Arrays/loops are sized
+  from `OnScreenDevice.ButtonCount`.
+- Modes: Hidden / Play / Inventory. Inventory shows Exit (`Select`, top-right)
+  and pane arrows (`LeftBumper`/`RightBumper`, bottom corners); item selection
+  and tab taps stay on `InventoryTouchInput`. Pause, menus and cutscenes hide
+  the pad.
 
-## Pad layout and look
+### Current play layout
 
-- Face diamond: Attack left, Cast right, Dream above, Jump below; the cluster is
-  raised so the bottom button is not against the screen edge.
-- Top row reduced to three pills: Map, Inventory, Throw (the dash and
-  super-dash pills were removed). Pause is a small pill in the top-right corner.
-- Buttons use proper rounded-rect pills and dark-filled rings with a white
-  border, a brighter pressed state, and text with a shadow. This fixes the
-  stretched/line-like appearance of the old pill texture.
+- Diamond: **Dash top**, **Attack left**, **Jump bottom**, **Heal right**.
+  Centre 0.845W/0.60H, face offset 0.155 `vmin`, face radius 0.080 `vmin`.
+- **Throw and Cast** pills above the diamond: 0.110W × 0.090 `vmin`, centres
+  0.784W/0.906W, 0.012W gap (≈257 px each on the S23+; the pair is ~23% of the
+  screen width).
+- **Map and Inventory**: text pills stacked on the left under the health HUD,
+  0.130W × 0.075 `vmin`, centre 0.100W, y 0.30/0.40.
+- **Pause**: small pill in the top-right corner, 0.055W × 0.075 `vmin`.
+- **Cast and Heal send the same `Action2`**: tap = Silk Skill, hold = heal.
+  `Action4` (Dream Nail/Needolin) is no longer on the pad; it only works on
+  valid targets, which is why it looked dead.
+- Buttons use rounded-rect pills/rings with a dark fill, white border, brighter
+  pressed state and shadowed labels.
 
-## Inventory, pause and back
+## Input / shell
 
-- The pad now has three modes: hidden, play, and inventory.
-- Inventory mode shows **Exit** (Select, closes the inventory) in the top-right
-  corner and pane **&lt;** / **&gt;** buttons (LeftBumper/RightBumper) in the
-  bottom corners. Item selection and tab taps remain the existing touch path.
-- Back handling: `PlayerActivity.dispatchKeyEvent` intercepts `KEYCODE_BACK`
-  before Unity's view consumes it, and `onBackPressed` covers gesture back.
-  Both inject Escape, which the game binds to Pause and MenuCancel, instead of
-  finishing the Activity.
-- Visibility is gated on `GameState`, `isPaused` and `isInventoryOpen`; pause,
-  menus and cutscenes hide the pad, inventory gets its own overlay.
+- `PlayerActivity.dispatchKeyEvent` intercepts `KEYCODE_BACK` before Unity's
+  view and injects Escape (Pause/MenuCancel); `onBackPressed` covers gesture
+  back. The Activity is no longer finished by the back key.
+- Keep-screen-on moved to the real shell window: the launcher passes
+  `keep_screen_on` in the launch intent and `PlayerActivity` sets
+  `FLAG_KEEP_SCREEN_ON` (re-applied on resume/focus). `KeepScreenOn.cs` was
+  deleted.
 
-## Screen-on
+## Launcher / build
 
-- `KeepScreenOn.cs` was deleted. The setting is passed from the launcher as an
-  intent extra to the shell, and `PlayerActivity` sets
-  `FLAG_KEEP_SCREEN_ON` on the real game window (and re-asserts it on resume and
-  focus changes). `UnityPlayer.currentActivity` is not populated for a
-  shell-hosted player, which is why the old patch did nothing in-game.
-
-## Build and launcher
-
-- On-device il2cpp budget: a 2.5 GB heap is now the first tier on devices with
-  ≥6.6 GB total RAM (previously unlimited, which peaks around 3.3 GB and gets
-  reclaimed by Android on a loaded 7 GB phone). Retrying from a higher tier
-  drops to the known 1792 MB tier instead of halving immediately.
-- Launcher landscape layout: the menu buttons are in a `ScrollView`, so the
-  **Launch** button stays pinned at the bottom instead of being laid out below
-  the visible area on short/landscape windows.
-- The README now has fork-specific install steps, recommended device
-  requirements, and an explicit note that GOG and the on-screen controls are
-  experimental.
+- Launcher landscape fix: the menu is a `ScrollView` with **Launch pinned at the
+  bottom**, so it stays visible on short/landscape windows.
+- `MonoRuntime.il2cppBudget` starts **SM-S916\*** (Galaxy S23+) at 6
+  cores/1792 MB instead of the 2.5 GB first tier, which was reclaimed near the
+  end. One reliable attempt instead of a failed attempt plus retry.
+- Exit-code parsing fixed: monojni writes the status with `%u`, so `-1` arrives
+  as `4294967295`; `MonoRuntime` now parses as a long and narrows to `Int`
+  instead of reporting `FAILED`/120.
+- Player-class dialog fix:
+  - `UnityDex.inject` refuses a jar that does not contain
+    `UnityPlayerForActivityOrService`.
+  - The repair probe uses a boot-parent `DexClassLoader`, so a stale graft in
+    the launcher process cannot make a good rebuilt jar look bad.
+- README: fork install steps, device requirements, prominent debug-signing
+  warning, physical-controller support, experimental GOG/touch controls note.
 
 ## Verification status
 
-- `make check` / `preview-compile`: passes with 0 errors.
-- The InControl device was verified on the S23+ with `InputProbe`: Action1..4,
-  Left/RightBumper, Left/RightTrigger and Select all produced edges.
-- The new layout, back handling and inventory overlay are **not yet
-  device-verified in a completed build**; the last on-device conversion was
-  interrupted at 935/1162 files by a phone restart. They compile, but expect to
-  finish one port and test.
-- Dash and super-dash were removed from the pad at the user's request; the game's
-  own controller mapping still binds them for physical controllers.
+- Patch compile check (`preview-compile.sh`): 0 errors.
+- 2.0.3 was installed and tested on the S23+: most buttons worked, Cast healed,
+  Throw required an up direction, Dream did nothing. That test drove the Heal
+  replacement and the layout changes.
+- 2.0.4 is installed; the on-device rebuild is pending. The player-class fix,
+  SM-S916 budget override, bigger/lower diamond and text Map/Inventory pills
+  still need a device pass.
+- Known: dash works once unlocked; Throw needs a tool equipped and aims with the
+  stick; Dream Nail/Needolin only reacts to valid targets.

@@ -69,17 +69,28 @@ game's decompiled code in `ref/` (e.g. `InputDevice`,
 `HeroActions.MoveVector`) — including the Start/View vs Menu/Select binding
 discrepancy (upstream issue #47 work) that motivated this file.
 
-## On-screen pad state (end of 2026-11-13/14 session)
-Committed `1297242` (build #50 installed). Working: flicker gone (include refresh decoupled
-from OnGUI visibility — it only ran while the pad drew, `incTries=0` proved it), include
-hammer fires every ~0.5 s (`incl=True`, gates all pass: gm/handler/inputActions non-null).
-Not working: no input reaches the game; the game's options say "no active controller".
-Next probes (one probe each, all against decompiled ref/ — no guessed APIs):
-1. `setActions` flag never goes True in ANY build — find its assignment and what gate blocks it.
-2. The game's "no active controller" = InControl `ActiveDevice` verdict — activity-based;
-   our device commits only zeros until pressed. Find the UI check in ref/ (grep
-   `ActiveDevice` in the game's managed code) and either send activity or bind the same way
-   the real controller binds (real controller path: Android HID -> Unity legacy joystick ->
-   InputHandler/ControllerMapping -> works).
-3. Inventory/Map pills invisible for the user since #48 — suspect a port that raced the
-   APK install (#48 landed 00:10:54, port started ~00:11); clean re-port on #50 checks it.
+## On-screen pad and game action mappings (verified 2026-11-19)
+
+- The game's controller mapping: `Action1` Jump, `Action2` Cast/Heal (tap casts
+  the Silk Skill, hold heals/binds), `Action3` Attack, `Action4` Dream
+  Nail/Needolin (only reacts to valid targets), `RightTrigger` Dash,
+  `LeftBumper` Map, `Select` Inventory, `RightBumper` QuickCast (tools/needles;
+  aims with the stick), `Start` Pause.
+- `OnScreenDevice` creates every control it uses explicitly. `InputDevice.OnAttached`
+  adds only alias controls (stick axes, DPad, Command, style commands); any
+  `UpdateWithState` on a control that was not added is a silent no-op.
+- The virtual device takes part in `InputManager.ActiveDevice` arbitration and
+  is activated with `RequestActivation()`. `PlayerActionSet.Device` is left
+  null; the game's `ControllerAttached/Activated -> MapControllerButtons` binds
+  the actions and `FindActiveDevice()` follows the active device.
+- The old failures (6-vs-8 arrays, missing controls, synthesized Android events,
+  the `IncludeDevices`/`AddBinding` hammer) are recorded in
+  `docs/SESSION-CHANGES.md`. Current layout: Dash top, Attack left, Jump bottom,
+  Heal right; Throw/Cast above the diamond; Map/Inventory text pills stacked
+  left; Pause top-right.
+- Player classes: `UnityDex` dexes the Unity player `classes.jar` on device and
+  grafts it into the app class loader. `inject` validates that the jar contains
+  `UnityPlayerForActivityOrService`; the repair probe uses a boot-parent
+  `DexClassLoader` so a stale graft in the launcher process cannot make a good
+  rebuilt jar look bad. If the old popup ever returns, force-stop the app first
+  (fresh process) and read `launcher.log`.

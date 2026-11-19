@@ -53,9 +53,9 @@ using UnityEngine;
 
 public class OnScreenDevice : InputDevice
 {
-    public const int ButtonCount = 8;
-    public const int Jump = 0, Cast = 1, Attack = 2, DreamNail = 3,
-                     Map = 4, Inventory = 5, Throw = 6, Pause = 7;
+    public const int ButtonCount = 9;
+    public const int Jump = 0, Cast = 1, Attack = 2, Heal = 3,
+                     Dash = 4, Map = 5, Inventory = 6, Throw = 7, Pause = 8;
 
     readonly bool[] buttons = new bool[ButtonCount];
     Vector2 stick;
@@ -76,7 +76,7 @@ public class OnScreenDevice : InputDevice
         AddControl(InputControlType.Action1, "Jump");
         AddControl(InputControlType.Action2, "Cast");
         AddControl(InputControlType.Action3, "Attack");
-        AddControl(InputControlType.Action4, "Dream Nail");
+        AddControl(InputControlType.RightTrigger, "Dash", 0.2f, 0.9f);
         AddControl(InputControlType.LeftBumper, "Map");
         AddControl(InputControlType.RightBumper, "Quick Cast");
         AddControl(InputControlType.RightStickButton, "Taunt");
@@ -97,9 +97,11 @@ public class OnScreenDevice : InputDevice
     {
         UpdateLeftStickWithValue(stick, updateTick, deltaTime);
         UpdateWithState(InputControlType.Action1, buttons[Jump], updateTick, deltaTime);
-        UpdateWithState(InputControlType.Action2, buttons[Cast], updateTick, deltaTime);
+        // Heal is the same game action as Cast (hold to heal); two buttons
+        // reach it, so OR them into the one control.
+        UpdateWithState(InputControlType.Action2, buttons[Cast] || buttons[Heal], updateTick, deltaTime);
         UpdateWithState(InputControlType.Action3, buttons[Attack], updateTick, deltaTime);
-        UpdateWithState(InputControlType.Action4, buttons[DreamNail], updateTick, deltaTime);
+        UpdateWithState(InputControlType.RightTrigger, buttons[Dash], updateTick, deltaTime);
         UpdateWithState(InputControlType.LeftBumper, buttons[Map], updateTick, deltaTime);
         UpdateWithState(InputControlType.Select, buttons[Inventory], updateTick, deltaTime);
         // Tools (the thrown needles/pins) are thrown with QuickCast, not Cast.
@@ -117,7 +119,8 @@ public class VirtualPad : MonoBehaviour
         Jump = OnScreenDevice.Jump,
         Cast = OnScreenDevice.Cast,
         Attack = OnScreenDevice.Attack,
-        DreamNail = OnScreenDevice.DreamNail,
+        Heal = OnScreenDevice.Heal,
+        Dash = OnScreenDevice.Dash,
         Map = OnScreenDevice.Map,
         Inventory = OnScreenDevice.Inventory,
         Throw = OnScreenDevice.Throw,
@@ -129,19 +132,30 @@ public class VirtualPad : MonoBehaviour
     // ── layout, as fractions of the screen ──────────────────────────────────
 
     const float CLUSTER_CX = 0.845f;   // face diamond centre, fraction of width
-    const float CLUSTER_CY = 0.59f;    // fraction of height, from TOP (Gui Y)
-    const float DIAMOND_R = 0.15f;     // face centre offset, of vmin
-    const float FACE_R = 0.075f;       // face hit/draw radius, of vmin
-    const float PILL_W = 0.18f;        // pill width, of width
-    const float PILL_H = 0.105f;       // pill height, of vmin
-    const float PILL_CY = 0.29f;       // pill centre Y, of vmin, from top
-    const float PILL_MAP_CX = 0.20f;
-    const float PILL_INV_CX = 0.50f;
-    const float PILL_THROW_CX = 0.80f;
-    const float PILL_PAUSE_W = 0.09f;  // pause, in the top-right corner
-    const float PILL_PAUSE_H = 0.07f;
-    const float PILL_PAUSE_CX = 0.94f;
-    const float PILL_PAUSE_CY = 0.075f;
+    const float CLUSTER_CY = 0.60f;    // fraction of height, from TOP (Gui Y)
+    const float DIAMOND_R = 0.155f;    // face centre offset, of vmin
+    const float FACE_R = 0.080f;       // face hit/draw radius, of vmin
+
+    // Throw/Cast pair above the diamond: 257 px each on a 2340 px screen,
+    // 28 px gap, centred on the diamond. Fits inside its 496 px face span
+    // with a small overhang.
+    const float CAST_THROW_W = 0.110f; // of width
+    const float CAST_THROW_H = 0.090f; // of vmin
+    const float CAST_THROW_CY = 0.27f; // of vmin, from top
+    const float THROW_CX = 0.784f;
+    const float CAST_CX = 0.906f;
+
+    // Map/Inventory: small pills stacked under the health HUD, left side.
+    const float MAP_INV_W = 0.130f;
+    const float MAP_INV_H = 0.075f;
+    const float MAP_INV_CX = 0.100f;
+    const float INV_CY = 0.30f;
+    const float MAP_CY = 0.40f;
+
+    const float PILL_PAUSE_W = 0.055f; // pause, actually in the top-right corner
+    const float PILL_PAUSE_H = 0.075f;
+    const float PILL_PAUSE_CX = 0.965f;
+    const float PILL_PAUSE_CY = 0.050f;
 
     // Inventory overlay: exit in the top-right, pane arrows in the bottom corners.
     const float INV_W = 0.10f;
@@ -163,7 +177,8 @@ public class VirtualPad : MonoBehaviour
         InputControlType.Action1,       // Jump
         InputControlType.Action2,       // Cast
         InputControlType.Action3,       // Attack
-        InputControlType.Action4,       // Dream Nail
+        InputControlType.Action2,       // Heal (same action as Cast)
+        InputControlType.RightTrigger,  // Dash
         InputControlType.LeftBumper,    // Map
         InputControlType.Select,        // Inventory
         InputControlType.RightBumper,   // Throw (tools / pins)
@@ -172,7 +187,7 @@ public class VirtualPad : MonoBehaviour
 
     static readonly string[] FallbackLabels =
     {
-        "Jump", "Cast", "Attack", "Dream",
+        "Jump", "Cast", "Attack", "Heal", "Dash",
         "Map", "Inventory", "Throw", "II",
     };
 
@@ -449,7 +464,7 @@ public class VirtualPad : MonoBehaviour
 
     static float vmin() => Mathf.Min(Screen.width, Screen.height);
 
-    static bool IsPill(int slot) => slot >= (int)PadButton.Map;
+    static bool IsPill(int slot) => slot == (int)PadButton.Cast || slot >= (int)PadButton.Map;
 
     Vector2 ButtonCentre(int slot)
     {
@@ -458,13 +473,14 @@ public class VirtualPad : MonoBehaviour
         var off = DIAMOND_R * vmin();
         switch ((PadButton)slot)
         {
-            case PadButton.Cast: return new Vector2(cx + off, cy);          // right
+            case PadButton.Dash: return new Vector2(cx, cy - off);          // top
             case PadButton.Attack: return new Vector2(cx - off, cy);        // left
-            case PadButton.Jump: return new Vector2(cx, cy + off);          // below
-            case PadButton.DreamNail: return new Vector2(cx, cy - off);     // above
-            case PadButton.Map: return new Vector2(PILL_MAP_CX * Screen.width, PILL_CY * vmin());
-            case PadButton.Inventory: return new Vector2(PILL_INV_CX * Screen.width, PILL_CY * vmin());
-            case PadButton.Throw: return new Vector2(PILL_THROW_CX * Screen.width, PILL_CY * vmin());
+            case PadButton.Jump: return new Vector2(cx, cy + off);          // bottom
+            case PadButton.Heal: return new Vector2(cx + off, cy);          // right
+            case PadButton.Throw: return new Vector2(THROW_CX * Screen.width, CAST_THROW_CY * vmin());
+            case PadButton.Cast: return new Vector2(CAST_CX * Screen.width, CAST_THROW_CY * vmin());
+            case PadButton.Inventory: return new Vector2(MAP_INV_CX * Screen.width, INV_CY * vmin());
+            case PadButton.Map: return new Vector2(MAP_INV_CX * Screen.width, MAP_CY * vmin());
             case PadButton.Pause: return new Vector2(PILL_PAUSE_CX * Screen.width, PILL_PAUSE_CY * vmin());
             default: return Vector2.zero;
         }
@@ -490,8 +506,10 @@ public class VirtualPad : MonoBehaviour
         var c = ButtonCentre(slot);
         if (slot == (int)PadButton.Pause)
             return Centered(c.x, c.y, PILL_PAUSE_W * Screen.width, PILL_PAUSE_H * vmin());
-        if (IsPill(slot))
-            return Centered(c.x, c.y, PILL_W * Screen.width, PILL_H * vmin());
+        if (slot == (int)PadButton.Cast || slot == (int)PadButton.Throw)
+            return Centered(c.x, c.y, CAST_THROW_W * Screen.width, CAST_THROW_H * vmin());
+        if (slot == (int)PadButton.Map || slot == (int)PadButton.Inventory)
+            return Centered(c.x, c.y, MAP_INV_W * Screen.width, MAP_INV_H * vmin());
         var r = FACE_R * vmin();
         return new Rect(c.x - r, c.y - r, r * 2f, r * 2f);
     }
@@ -510,7 +528,6 @@ public class VirtualPad : MonoBehaviour
         LabelFor(actions.Jump, "Jump");
         LabelFor(actions.Cast, "Cast");
         LabelFor(actions.Attack, "Attack");
-        LabelFor(actions.DreamNail, "Dream");
         LabelFor(actions.QuickCast, "Throw");
         LabelFor(actions.QuickMap, "Map");
         LabelFor(actions.OpenInventory, "Inventory");
