@@ -1207,8 +1207,32 @@ object MonoRuntime {
         val mi = ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)
         val pressure = if (mi.lowMemory) ", and the device is short of memory" else ""
-        "${gb(mi.availMem)} of ${gb(mi.totalMem)} free$pressure"
+        "${gb(mi.availMem)} of ${gb(mi.totalMem)} free$pressure${battery(context)}"
     }.getOrDefault("free memory unknown")
+
+    /**
+     * Temperature and whether it is on the charger, for the same line.
+     *
+     * Free memory is not the only thing that kills a conversion: a phone on
+     * the charger runs hotter, a hot phone throttles, and a throttled run is
+     * exposed to the memory killer for twice as long. The 2026-11-20 run took
+     * 24 minutes to reach the same file count that took 10 the day before, on
+     * a phone that was charging at 16%. Recorded here so the next log says
+     * which of the two it was instead of inviting a guess.
+     */
+    private fun battery(context: Context): String = runCatching {
+        val intent = context.registerReceiver(
+            null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED),
+        ) ?: return ""
+        val tenths = intent.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+        val plugged = intent.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0)
+        val temp = if (tenths == Int.MIN_VALUE) {
+            ""
+        } else {
+            String.format(java.util.Locale.US, ", %.1f °C", tenths / 10.0)
+        }
+        temp + if (plugged != 0) ", charging" else ""
+    }.getOrDefault("")
 
     /** How long the platform is given to write the record of a death. */
     private const val EXIT_REASON_TRIES = 6

@@ -235,8 +235,15 @@ step_5_apk_shell() {
             android:exported="false" android:process=":launcher"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+        <!--
+          Exported on purpose. The pad editor is reachable from Settings only
+          once a game has been built, and it is the one launcher screen worth
+          opening on a device that is still being set up (and from adb while
+          iterating on a layout). It writes nothing outside this app's own
+          files directory.
+        -->
         <activity android:name="dev.silksong.launcher.PadEditorActivity"
-            android:exported="false" android:process=":launcher"
+            android:exported="true" android:process=":launcher"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
         <!--
