@@ -214,6 +214,40 @@ class PadLayout(
         }
     }
 
+    /**
+     * The first pair of keys that are genuinely on top of each other, or null.
+     *
+     * Plain arithmetic rather than RectF so this can be tested off-device, and
+     * a tolerance rather than a strict test because the built-in diamond is
+     * designed to touch: its centres are 0.155 vmin apart and each radius is
+     * 0.080, so the four face keys overlap by 0.005 vmin on purpose. A strict
+     * test refuses the layout the game ships with -- which is exactly what
+     * happened the first time this screen was used.
+     */
+    fun firstOverlap(width: Int, height: Int, toleranceVmin: Float = 0.02f): String? {
+        if (width <= 0 || height <= 0) return null
+        val vmin = minOf(width, height).toFloat()
+        val tol = toleranceVmin * vmin
+        for (i in keys.indices) {
+            for (j in i + 1 until keys.size) {
+                val a = keys[i]
+                val b = keys[j]
+                val dx = kotlin.math.abs(a.x - b.x) * width
+                val dy = kotlin.math.abs(a.y - b.y) * height
+                val clash = if (a.shape == "circle" && b.shape == "circle") {
+                    val reach = (a.w * a.scale + b.w * b.scale) * vmin / 2f
+                    dx * dx + dy * dy < (reach - tol) * (reach - tol)
+                } else {
+                    val halfW = (a.w * a.scale + b.w * b.scale) * vmin / 2f
+                    val halfH = (a.h * a.scale + b.h * b.scale) * vmin / 2f
+                    dx < halfW - tol && dy < halfH - tol
+                }
+                if (clash) return "${a.label} and ${b.label}"
+            }
+        }
+        return null
+    }
+
     /** Values into a range the game can survive; mirrors PadLayoutFile.Clamp. */
     fun sanitise() {
         stick.mode = if (stick.mode == "pinned") "pinned" else "floating"

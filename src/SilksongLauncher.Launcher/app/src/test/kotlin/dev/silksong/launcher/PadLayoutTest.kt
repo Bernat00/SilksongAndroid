@@ -75,6 +75,23 @@ class PadLayoutTest {
     }
 
     @Test
+    fun theBuiltInLayoutIsSaveable() {
+        // The report that started this: Save refused the default layout,
+        // because the face diamond overlaps on purpose (0.155 vmin apart, 0.080
+        // radius) and the check compared bounding squares.
+        val defaults = PadLayout.defaults(w, h)
+        assertNull("defaults clash: ${defaults.firstOverlap(w, h)}", defaults.firstOverlap(w, h))
+    }
+
+    @Test
+    fun twoKeysInTheSamePlaceAreStillRefused() {
+        val layout = PadLayout.defaults(w, h)
+        layout.keys[1].x = layout.keys[0].x
+        layout.keys[1].y = layout.keys[0].y
+        assertNotNull(layout.firstOverlap(w, h))
+    }
+
+    @Test
     fun outOfRangeValuesAreClampedNotTrusted() {
         val layout = PadLayout.defaults(w, h)
         layout.keys[0].x = 4f

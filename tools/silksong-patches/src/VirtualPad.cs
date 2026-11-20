@@ -397,16 +397,29 @@ public class VirtualPad : MonoBehaviour
             // A key placed inside the stick's zone is the one the user asked
             // for; the zone is only a convenience. Keys win, and the editor is
             // what keeps the overlap from being an accident.
-            var claimed = false;
+            //
+            // Among keys, the nearest centre wins rather than the lowest slot
+            // number: the hit areas are bounding squares (deliberately
+            // generous for a thumb), the face circles overlap by design, and
+            // "first slot that contains this point" made Jump win every tie by
+            // being slot 0 -- a mis-press at exactly the edge where aim is
+            // worst.
+            var claim = -1;
+            var claimDistance = float.MaxValue;
             for (int b = 0; b < ButtonCount; b++)
             {
                 if (buttonFinger[b] != -1) continue;
                 if (!Hit(b, gui)) continue;
-                buttonFinger[b] = t.fingerId;
-                claimed = true;
-                break;
+                var distance = (ButtonCentre(b) - gui).sqrMagnitude;
+                if (distance >= claimDistance) continue;
+                claim = b;
+                claimDistance = distance;
             }
-            if (claimed) continue;
+            if (claim >= 0)
+            {
+                buttonFinger[claim] = t.fingerId;
+                continue;
+            }
             if (stickFinger == -1 && InStickZone(gui))
             {
                 stickFinger = t.fingerId;

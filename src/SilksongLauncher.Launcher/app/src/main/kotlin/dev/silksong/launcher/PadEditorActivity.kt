@@ -270,17 +270,7 @@ class PadEditorActivity : Activity() {
             )
         }
 
-        fun overlappingKeys(): String? {
-            val rects = layout.keys.map { keyRect(it) }
-            for (i in rects.indices) {
-                for (j in i + 1 until rects.size) {
-                    if (RectF.intersects(rects[i], rects[j])) {
-                        return "${layout.keys[i].label} and ${layout.keys[j].label}"
-                    }
-                }
-            }
-            return null
-        }
+        fun overlappingKeys(): String? = layout.firstOverlap(width, height)
 
         override fun onDraw(g: Canvas) {
             super.onDraw(g)
