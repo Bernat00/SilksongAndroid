@@ -82,8 +82,7 @@ RUN set -eux; \
         "platform-tools" \
         "platforms;android-${ANDROID_PLATFORM}" \
         "build-tools;36.0.0" \
-        "build-tools;35.0.0" >/dev/null; \
-    chmod -R a+rX "$ANDROID_HOME"
+        "build-tools;35.0.0" >/dev/null
 
 # The NDK, as its own layer so the SDK step above stays cached.
 #
@@ -95,10 +94,19 @@ RUN set -eux; \
 # free on a fast pipe, a silent half-gigabyte of roulette otherwise, and
 # issue #47's build died after an hibernate cut the connection under it.
 # Pinned to the launcher's version, whatever that reads.
+#
+# No `chmod -R a+rX "$ANDROID_HOME"` here, deliberately. That line used to follow
+# this install, and on overlayfs a recursive chmod *copies up* every file it
+# touches from the layers below -- so it rewrote the SDK that the previous step
+# had just installed, megabytes-per-second on spinning storage, for permissions
+# nothing reads (the build runs as root). Measured on the TrueNAS box: the NDK
+# install finished, then 14 minutes of disk-sleep in `cv_wait_common` with 3.7 GB
+# written and three seconds of CPU. sdkmanager already extracts its files
+# world-readable; if a non-root user is ever added, chmod the specific directory
+# that needs it, never the tree.
 RUN set -eux; \
     printf 'y\n%.0s' $(seq 1 50) | sdkmanager --licenses >/dev/null; \
-    sdkmanager --install "ndk;27.2.12479018" >/dev/null; \
-    chmod -R a+rX "$ANDROID_HOME"
+    sdkmanager --install "ndk;27.2.12479018" >/dev/null
 
 # ── .NET 8 ─────────────────────────────────────────────────────────────────
 #

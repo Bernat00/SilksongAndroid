@@ -38,6 +38,12 @@ services:
         # difference between a container build being usable and being something
         # you start and walk away from. Same directory a host build uses.
         - silksong-build:/root/.cache/silksong
+        # The signing key. `run --rm` gives every build a fresh container, and
+        # the entrypoint generates a debug keystore when it finds none -- so
+        # without this volume every run signed with a different key, and each
+        # APK had to be uninstalled before the next one would install. Kept in
+        # a volume rather than the checkout: a keystore must never be committed.
+        - silksong-android-home:/root/.android
         # The host's NuGet cache. bundle-surgery pins both of its packages, so
         # with them already extracted here the restore needs no network at all
         # -- which matters on a machine whose policy blocks api.nuget.org.
@@ -86,3 +92,4 @@ volumes:
   silksong-gradle:
   silksong-unity-player:
   silksong-build:
+  silksong-android-home:

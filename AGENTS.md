@@ -28,9 +28,11 @@ make docker-up && make docker-dev   # persistent container, warm Gradle
 ```
 
 The container has no USB bus: it writes `build/` and the host installs it
-(`make install`). It also **generates its own debug keystore**, so its signature
-differs from every other build's — installing over a laptop build needs an
-uninstall first. `LAUNCHER=0` skips Gradle; `DEBUGGABLE` defaults to 1 in the
+(`make install`). It signs with its own debug keystore, kept in the
+`silksong-android-home` volume at `/root/.android`, so container builds install
+over each other — but not over a laptop-signed APK, which needs an uninstall
+first (`adb uninstall -k` keeps the app data, and `hasFragileUserData` is what
+makes Android offer to). `LAUNCHER=0` skips Gradle; `DEBUGGABLE` defaults to 1 in the
 container (that is what makes `run-as` work) and 0 in a host build. There is no
 `build/debug.keystore` in the checkout, so `KEYSTORE=/workspace/build/debug.keystore`
 fails with "no keystore at …" — leave `KEYSTORE` unset to use the generated one.
