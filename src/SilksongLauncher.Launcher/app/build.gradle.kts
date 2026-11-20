@@ -67,6 +67,10 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // android.jar's org.json is a stub in unit tests: every method throws
+    // "not mocked". PadLayout writes the layout as JSON, so the tests need a
+    // real one on the test classpath.
+    testImplementation("org.json:json:20240303")
 
     // Apache Commons Compress: TarArchiveInputStream we wrap around
     // the decompressed LZ4 stream during bundle extraction.

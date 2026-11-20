@@ -1,0 +1,363 @@
+package dev.silksong.launcher
+
+import android.app.Activity
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.os.Bundle
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+
+/**
+ * The on-screen pad's layout editor.
+ *
+ * Drag a key to move it, pinch it to scale it, drag the ring to move the
+ * stick, drag inside the zone or pinch it to move/resize the zone. Save writes
+ * `pad-layout.json`, which the game reads at its next launch -- no rebuild, no
+ * conversion, because the pad is compiled into the image and this file is the
+ * only part of it that is not.
+ *
+ * Deliberately a launcher screen rather than drag-in-game: the whole layout is
+ * visible at once, nothing is on top of it, and a mistake here cannot break the
+ * game's touch handling. Everything it enforces (no overlapping keys, sane
+ * ranges) is enforced again by the game when it reads the file.
+ */
+class PadEditorActivity : Activity() {
+
+    private lateinit var canvas: PadCanvas
+    private lateinit var status: TextView
+    private lateinit var pinButton: Button
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#0D0A0B"))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+
+        root.addView(TextView(this).apply {
+            text = "On-screen pad"
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        root.addView(TextView(this).apply {
+            text = "Drag to move · pinch to scale · tap the ring or the zone to select it. " +
+                "The game picks this up the next time it starts."
+            setTextColor(Color.parseColor("#B5A9AC"))
+            textSize = 12f
+            setPadding(0, dp(6), 0, dp(10))
+        })
+
+        canvas = PadCanvas()
+        root.addView(canvas, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        status = TextView(this).apply {
+            setTextColor(Color.parseColor("#B5A9AC"))
+            textSize = 12f
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        root.addView(status)
+
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pinButton = button("Stick: floating") { togglePin() }
+        row.addView(pinButton, weight())
+        row.addView(button("Reset") { reset() }, weight())
+        row.addView(button("Cancel") { finish() }, weight())
+        row.addView(button("Save") { save() }, weight())
+        root.addView(row)
+
+        setContentView(root)
+        canvas.load()
+        updatePin()
+    }
+
+    private fun weight() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        .apply { marginEnd = dp(6) }
+
+    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 13f
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(dp(6), dp(10), dp(6), dp(10))
+        backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#7D3341"))
+        setTextColor(Color.WHITE)
+        setOnClickListener { onClick() }
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun togglePin() {
+        val stick = canvas.layout.stick
+        stick.mode = if (stick.mode == "pinned") "floating" else "pinned"
+        updatePin()
+        canvas.invalidate()
+    }
+
+    private fun updatePin() {
+        pinButton.text = if (canvas.layout.stick.mode == "pinned") "Stick: pinned" else "Stick: floating"
+    }
+
+    private fun reset() {
+        canvas.layout = PadLayout.defaults(canvas.width, canvas.height)
+        updatePin()
+        canvas.deselect()
+        canvas.invalidate()
+        status.text = "Reset to the built-in layout. Save to keep it."
+    }
+
+    private fun save() {
+        val clash = canvas.overlappingKeys()
+        if (clash != null) {
+            status.text = "Those two overlap: $clash. Move one before saving."
+            return
+        }
+        try {
+            PadLayout.save(this, canvas.layout)
+            status.text = "Saved. The game uses it next time it starts."
+            LauncherLog.log("pad editor: saved ${canvas.layout.keys.size} keys")
+        } catch (t: Throwable) {
+            status.text = "Could not save: ${t.message}"
+            LauncherLog.log("pad editor: save failed", t)
+        }
+    }
+
+    /**
+     * The pad, drawn the way the game will draw it and hit the way the game
+     * will hit it: one rect per item serving both, so what is touched is what
+     * is shown.
+     */
+    inner class PadCanvas : View(this@PadEditorActivity) {
+
+        var layout: PadLayout = PadLayout.defaults(1, 1)
+        private var selectedKey = -1
+        private var selectedStick = false
+        private var selectedZone = false
+        private var scaling = false
+        private var startDistance = 0f
+        private var startValue = 0f
+        private var lastX = 0f
+        private var lastY = 0f
+
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2f * resources.displayMetrics.density
+        }
+        private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            color = Color.WHITE
+        }
+
+        fun load() {
+            layout = PadLayout.load(this@PadEditorActivity, width, height)
+            invalidate()
+        }
+
+        fun deselect() {
+            selectedKey = -1
+            selectedStick = false
+            selectedZone = false
+        }
+
+        private fun vmin() = minOf(width, height).toFloat().coerceAtLeast(1f)
+
+        private fun keyRect(k: PadLayout.Key): RectF {
+            val cx = k.x * width
+            val cy = k.y * height
+            val w = k.w * vmin() * k.scale
+            val h = k.h * vmin() * k.scale
+            return RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+        }
+
+        private fun zoneRect(): RectF {
+            val s = layout.stick
+            return RectF(s.x0 * width, s.y0 * height, s.x1 * width, s.y1 * height)
+        }
+
+        private fun ringCentre() =
+            android.graphics.PointF(layout.stick.cx * width, layout.stick.cy * height)
+
+        fun overlappingKeys(): String? {
+            val rects = layout.keys.map { keyRect(it) }
+            for (i in rects.indices) {
+                for (j in i + 1 until rects.size) {
+                    if (RectF.intersects(rects[i], rects[j])) {
+                        return "${layout.keys[i].label} and ${layout.keys[j].label}"
+                    }
+                }
+            }
+            return null
+        }
+
+        override fun onDraw(g: Canvas) {
+            super.onDraw(g)
+            val s = layout.stick
+            val zone = zoneRect()
+            fill.color = Color.parseColor("#1F7D3341")
+            g.drawRect(zone, fill)
+            stroke.color = if (selectedZone) Color.WHITE else Color.parseColor("#7D3341")
+            g.drawRect(zone, stroke)
+
+            val centre = ringCentre()
+            val radius = s.r * vmin()
+            fill.color = Color.parseColor("#33000000")
+            g.drawCircle(centre.x, centre.y, radius, fill)
+            stroke.color = if (selectedStick) Color.WHITE else Color.parseColor("#B5A9AC")
+            g.drawCircle(centre.x, centre.y, radius, stroke)
+
+            text.textSize = resources.displayMetrics.density * 13f
+            for ((index, k) in layout.keys.withIndex()) {
+                val r = keyRect(k)
+                fill.color = Color.parseColor("#55000000")
+                if (k.shape == "pill") {
+                    g.drawRoundRect(r, r.height() / 2f, r.height() / 2f, fill)
+                } else {
+                    g.drawOval(r, fill)
+                }
+                stroke.color = if (index == selectedKey) Color.WHITE else Color.parseColor("#B5A9AC")
+                if (k.shape == "pill") {
+                    g.drawRoundRect(r, r.height() / 2f, r.height() / 2f, stroke)
+                } else {
+                    g.drawOval(r, stroke)
+                }
+                g.drawText(k.label, r.centerX(), r.centerY() + text.textSize / 3f, text)
+            }
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> begin(event.x, event.y)
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount >= 2) beginScale(event)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (scaling && event.pointerCount >= 2) applyScale(event) else drag(event.x, event.y)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    scaling = false
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    scaling = false
+                }
+            }
+            return true
+        }
+
+        private fun begin(x: Float, y: Float) {
+            lastX = x
+            lastY = y
+            scaling = false
+            // Keys first, then the ring, then the zone: the drawing order
+            // bottom-up, so the thing on top is the thing picked.
+            for (index in layout.keys.indices.reversed()) {
+                if (keyRect(layout.keys[index]).contains(x, y)) {
+                    deselect()
+                    selectedKey = index
+                    status.text = "${layout.keys[index].label}: drag to move, pinch to scale " +
+                        "(${layout.keys[index].target})"
+                    invalidate()
+                    return
+                }
+            }
+            val centre = ringCentre()
+            val radius = layout.stick.r * vmin()
+            val dx = x - centre.x
+            val dy = y - centre.y
+            if (dx * dx + dy * dy <= radius * radius) {
+                deselect()
+                selectedStick = true
+                status.text = "Stick ring: drag to move, pinch its size"
+                invalidate()
+                return
+            }
+            if (zoneRect().contains(x, y)) {
+                deselect()
+                selectedZone = true
+                status.text = "Stick zone: drag to move, pinch its size"
+                invalidate()
+                return
+            }
+            deselect()
+            status.text = "Tap a key, the ring or the zone to select it."
+            invalidate()
+        }
+
+        private fun drag(x: Float, y: Float) {
+            val dx = (x - lastX) / width
+            val dy = (y - lastY) / height
+            lastX = x
+            lastY = y
+            if (selectedKey >= 0) {
+                val k = layout.keys[selectedKey]
+                k.x = (k.x + dx).coerceIn(0.02f, 0.98f)
+                k.y = (k.y + dy).coerceIn(0.02f, 0.98f)
+            } else if (selectedStick) {
+                val s = layout.stick
+                s.cx = (s.cx + dx).coerceIn(0f, 1f)
+                s.cy = (s.cy + dy).coerceIn(0f, 1f)
+            } else if (selectedZone) {
+                val s = layout.stick
+                val w = s.x1 - s.x0
+                val h = s.y1 - s.y0
+                s.x0 = (s.x0 + dx).coerceIn(0f, 1f - w)
+                s.y0 = (s.y0 + dy).coerceIn(0f, 1f - h)
+                s.x1 = s.x0 + w
+                s.y1 = s.y0 + h
+            } else {
+                return
+            }
+            invalidate()
+        }
+
+        private fun beginScale(event: MotionEvent) {
+            scaling = true
+            startDistance = distance(event)
+            startValue = when {
+                selectedKey >= 0 -> layout.keys[selectedKey].scale
+                selectedStick -> layout.stick.r
+                selectedZone -> layout.stick.x1 - layout.stick.x0
+                else -> 0f
+            }
+        }
+
+        private fun applyScale(event: MotionEvent) {
+            if (startDistance <= 0f || startValue <= 0f) return
+            val factor = (distance(event) / startDistance).coerceIn(0.5f, 2f)
+            when {
+                selectedKey >= 0 -> layout.keys[selectedKey].scale = (startValue * factor).coerceIn(0.5f, 2f)
+                selectedStick -> layout.stick.r = (startValue * factor).coerceIn(0.05f, 0.30f)
+                selectedZone -> {
+                    val s = layout.stick
+                    val cx = (s.x0 + s.x1) / 2f
+                    val cy = (s.y0 + s.y1) / 2f
+                    val halfW = ((s.x1 - s.x0) / 2f * factor).coerceIn(0.05f, 0.6f)
+                    val halfH = ((s.y1 - s.y0) / 2f * factor).coerceIn(0.05f, 0.6f)
+                    s.x0 = (cx - halfW).coerceIn(0f, 1f)
+                    s.x1 = (cx + halfW).coerceIn(0f, 1f)
+                    s.y0 = (cy - halfH).coerceIn(0f, 1f)
+                    s.y1 = (cy + halfH).coerceIn(0f, 1f)
+                }
+            }
+            invalidate()
+        }
+
+        private fun distance(event: MotionEvent): Float {
+            if (event.pointerCount < 2) return 0f
+            val dx = event.getX(0) - event.getX(1)
+            val dy = event.getY(0) - event.getY(1)
+            return kotlin.math.sqrt(dx * dx + dy * dy)
+        }
+    }
+}

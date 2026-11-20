@@ -167,6 +167,10 @@ class SettingsActivity : Activity() {
         findViewById<Button>(R.id.btn_settings_logs).setOnClickListener {
             startActivity(Intent(this, LogActivity::class.java))
         }
+
+        findViewById<Button>(R.id.btn_settings_pad).setOnClickListener {
+            startActivity(Intent(this, PadEditorActivity::class.java))
+        }
     }
 
     /**

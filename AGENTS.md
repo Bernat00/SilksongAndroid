@@ -187,6 +187,27 @@ the build" is heavy and usually unnecessary.
 
 ## The on-screen pad (`tools/silksong-patches/src/VirtualPad.cs`)
 
+- **The layout is a file, not code**: `pad-layout.json` in the app's external
+  files dir, written by the launcher's **Settings → "On-screen pad"** editor
+  (`PadEditorActivity`, `PadLayout.kt`) and read once per process by the pad.
+  A key can be moved, scaled (0.5–2×) or rebound without another IL2CPP
+  conversion, which a code change always costs. Units: `x` fraction of width,
+  `y` fraction of height from the top, `w`/`h` fraction of vmin. Inventory-mode
+  rects are deliberately **not** in the file — they are placed to match the
+  game's own inventory buttons.
+- The stick zone is a rectangle (`zoneX0/Y0/X1/Y1`) plus a ring (`cx`,`cy`,`r`)
+  and a `mode`: `floating` (ring jumps to the touch) or `pinned` (ring stays,
+  knob leans — re-touching resumes from the same centre). Keys win touches over
+  the zone, so a key deliberately placed inside it still works; the editor is
+  what keeps that from being an accident, and it refuses overlapping keys.
+- `OnScreenDevice` takes its `InputControlType` per slot from the file, so
+  rebinding is data too. Two slots may name the same target on purpose (Cast and
+  Heal are both `Action2`; the device ORs them). Only the ~12 controls the game
+  binds are offered — anything else would be a button that does nothing.
+- Defaults now keep Map/Inventory above the stick zone (they used to sit at
+  0.40/0.30 of the height, inside it) and give Pause a real margin from the
+  corner.
+
 - `OnScreenDevice` is a real InControl `InputDevice` with every control the game
   binds; `InputManager` owns `Commit` and `ActiveDevice` arbitrates between the
   pad, a physical controller and the keyboard. No `PlayerActionSet.Device` pin,

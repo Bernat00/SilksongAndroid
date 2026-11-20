@@ -47,6 +47,9 @@
 #if UNITY_ANDROID && !UNITY_EDITOR
 
 using InControl;
+using System;
+using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 
 // ── the device ─────────────────────────────────────────────────────────────
@@ -58,10 +61,26 @@ public class OnScreenDevice : InputDevice
                      Dash = 4, Map = 5, Inventory = 6, Throw = 7, Pause = 8;
 
     readonly bool[] buttons = new bool[ButtonCount];
+
+    // Which InControl control each slot feeds, from the layout file. Slots are
+    // the pad's own vocabulary; targets are what the game binds, and two slots
+    // may name the same target on purpose (Cast and Heal both feed Action2 --
+    // tap casts, hold heals -- and the OR below is what makes that work).
+    readonly InputControlType[] targets;
+    readonly InputControlType[] controls;
     Vector2 stick;
 
-    public OnScreenDevice() : base("On-Screen Controls")
+    public OnScreenDevice(InputControlType[] targets, string[] names) : base("On-Screen Controls")
     {
+        this.targets = (InputControlType[])targets.Clone();
+        var distinct = new List<InputControlType>();
+        for (int i = 0; i < targets.Length; i++)
+        {
+            if (targets[i] == InputControlType.None) continue;
+            if (!distinct.Contains(targets[i])) distinct.Add(targets[i]);
+        }
+        controls = distinct.ToArray();
+
         Meta = "On-Screen Controls";
         DeviceClass = InputDeviceClass.Controller;
         DeviceStyle = InputDeviceStyle.Unknown; // IsKnown stays true -> IsUnknown false
@@ -73,15 +92,22 @@ public class OnScreenDevice : InputDevice
         AddControl(InputControlType.LeftStickRight, "Left Stick Right", 0.2f, 0.9f);
         AddControl(InputControlType.LeftStickUp, "Left Stick Up", 0.2f, 0.9f);
         AddControl(InputControlType.LeftStickDown, "Left Stick Down", 0.2f, 0.9f);
-        AddControl(InputControlType.Action1, "Jump");
-        AddControl(InputControlType.Action2, "Cast");
-        AddControl(InputControlType.Action3, "Attack");
-        AddControl(InputControlType.RightTrigger, "Dash", 0.2f, 0.9f);
-        AddControl(InputControlType.LeftBumper, "Map");
-        AddControl(InputControlType.RightBumper, "Quick Cast");
-        AddControl(InputControlType.RightStickButton, "Taunt");
-        AddControl(InputControlType.Select, "Inventory"); // not a "standard" target
-        AddControl(InputControlType.Start, "Pause");
+        for (int c = 0; c < controls.Length; c++)
+        {
+            // The triggers carry the same dead zone they always had; every
+            // other target is a plain button.
+            if (controls[c] == InputControlType.RightTrigger || controls[c] == InputControlType.LeftTrigger)
+                AddControl(controls[c], NameFor(controls[c], names), 0.2f, 0.9f);
+            else
+                AddControl(controls[c], NameFor(controls[c], names));
+        }
+    }
+
+    string NameFor(InputControlType control, string[] names)
+    {
+        for (int s = 0; s < targets.Length; s++)
+            if (targets[s] == control && names != null && s < names.Length) return names[s];
+        return control.ToString();
     }
 
     /** One atomic snapshot per frame; the router is the only writer. */
@@ -96,17 +122,13 @@ public class OnScreenDevice : InputDevice
     public override void Update(ulong updateTick, float deltaTime)
     {
         UpdateLeftStickWithValue(stick, updateTick, deltaTime);
-        UpdateWithState(InputControlType.Action1, buttons[Jump], updateTick, deltaTime);
-        // Heal is the same game action as Cast (hold to heal); two buttons
-        // reach it, so OR them into the one control.
-        UpdateWithState(InputControlType.Action2, buttons[Cast] || buttons[Heal], updateTick, deltaTime);
-        UpdateWithState(InputControlType.Action3, buttons[Attack], updateTick, deltaTime);
-        UpdateWithState(InputControlType.RightTrigger, buttons[Dash], updateTick, deltaTime);
-        UpdateWithState(InputControlType.LeftBumper, buttons[Map], updateTick, deltaTime);
-        UpdateWithState(InputControlType.Select, buttons[Inventory], updateTick, deltaTime);
-        // Tools (the thrown needles/pins) are thrown with QuickCast, not Cast.
-        UpdateWithState(InputControlType.RightBumper, buttons[Throw], updateTick, deltaTime);
-        UpdateWithState(InputControlType.Start, buttons[Pause], updateTick, deltaTime);
+        for (int c = 0; c < controls.Length; c++)
+        {
+            var on = false;
+            for (int s = 0; s < ButtonCount && !on; s++)
+                on = targets[s] == controls[c] && buttons[s];
+            UpdateWithState(controls[c], on, updateTick, deltaTime);
+        }
     }
 }
 
@@ -129,35 +151,32 @@ public class VirtualPad : MonoBehaviour
 
     const int ButtonCount = OnScreenDevice.ButtonCount;
 
-    // ── layout, as fractions of the screen ──────────────────────────────────
+    // ── layout: a file, not constants ───────────────────────────────────────
 
-    const float CLUSTER_CX = 0.845f;   // face diamond centre, fraction of width
-    const float CLUSTER_CY = 0.60f;    // fraction of height, from TOP (Gui Y)
-    const float DIAMOND_R = 0.155f;    // face centre offset, of vmin
-    const float FACE_R = 0.080f;       // face hit/draw radius, of vmin
+    // Everything that used to be a const here is now a PadLayoutFile, read
+    // from pad-layout.json in the app's own files directory. The launcher
+    // writes it and this reads it once, in Start.
+    //
+    // That indirection is the point: the pad is compiled INTO the built game
+    // (it is one of the C# patches), so a number written in this file is the
+    // only way to move a button without paying for another conversion on the
+    // phone. The constants below survive as Defaults(), which is exactly what
+    // this file would contain on a device that has never opened the editor.
+    //
+    // Units: [x] is a fraction of Screen.width, [y] a fraction of
+    // Screen.height measured from the TOP (GUI convention, since every touch
+    // is converted at the routing boundary), and [w]/[h] are fractions of
+    // vmin() so a circle stays circular at any aspect.
 
-    // Throw/Cast pair above the diamond: 257 px each on a 2340 px screen,
-    // 28 px gap, centred on the diamond. Fits inside its 496 px face span
-    // with a small overhang.
-    const float CAST_THROW_W = 0.110f; // of width
-    const float CAST_THROW_H = 0.090f; // of vmin
-    const float CAST_THROW_CY = 0.27f; // of vmin, from top
-    const float THROW_CX = 0.784f;
-    const float CAST_CX = 0.906f;
+    PadLayoutFile layout;
 
-    // Map/Inventory: small pills stacked under the health HUD, left side.
-    const float MAP_INV_W = 0.130f;
-    const float MAP_INV_H = 0.075f;
-    const float MAP_INV_CX = 0.100f;
-    const float INV_CY = 0.30f;
-    const float MAP_CY = 0.40f;
+    /** The InControl control each slot feeds, parsed from the layout once. */
+    readonly InputControlType[] targets = new InputControlType[ButtonCount];
 
-    const float PILL_PAUSE_W = 0.055f; // pause, actually in the top-right corner
-    const float PILL_PAUSE_H = 0.075f;
-    const float PILL_PAUSE_CX = 0.965f;
-    const float PILL_PAUSE_CY = 0.050f;
-
-    // Inventory overlay: exit in the top-right, pane arrows in the bottom corners.
+    // Inventory overlay: exit in the top-right, pane arrows in the bottom
+    // corners. Deliberately NOT in the layout file: the inventory is the
+    // game's own screen, these three arrows are placed to match its buttons,
+    // and a layout that moved them would misalign them.
     const float INV_W = 0.10f;
     const float INV_H = 0.075f;
     const float INV_EXIT_CX = 0.93f;
@@ -165,14 +184,11 @@ public class VirtualPad : MonoBehaviour
     const float INV_LEFT_CX = 0.09f;
     const float INV_RIGHT_CX = 0.91f;
     const float INV_ARROW_CY = 0.92f;
-    const float STICK_ZONE_W = 0.40f;  // left thumb zone
-    const float STICK_ZONE_H = 0.70f;  // of height, from top
-    const float STICK_RING_R = 0.125f; // resting ring radius, of vmin
-    const float STICK_REST_X = 0.165f; // resting ring centre, of width
-    const float STICK_REST_Y = 0.30f;  // of height, from bottom
+
     const float KNOB_RANGE = 0.65f;    // knob travel, of ring radius
 
-    static readonly InputControlType[] Targets =
+    /** Where each slot goes when the layout file names no target. */
+    static readonly InputControlType[] FallbackTargets =
     {
         InputControlType.Action1,       // Jump
         InputControlType.Action2,       // Cast
@@ -231,14 +247,36 @@ public class VirtualPad : MonoBehaviour
 
     void Start()
     {
-        device = new OnScreenDevice();
+        layout = PadLayoutFile.Load();
+        var names = new string[ButtonCount];
+        for (int i = 0; i < ButtonCount; i++)
+        {
+            var spec = layout.keys[i];
+            targets[i] = ParseTarget(spec != null ? spec.target : null, FallbackTargets[i]);
+            var label = spec != null ? spec.label : null;
+            labels[i] = string.IsNullOrEmpty(label) ? FallbackLabels[i] : label;
+            names[i] = labels[i];
+            labelContent[i] = new GUIContent(labels[i]);
+        }
+        device = new OnScreenDevice(targets, names);
         invExitContent = new GUIContent("Exit");
         invLeftContent = new GUIContent("<");
         invRightContent = new GUIContent(">");
-        for (int i = 0; i < ButtonCount; i++)
+        if (Verbose)
+            Debug.Log($"[VPad] layout {PadLayoutFile.Source}, stick={layout.stick.mode}, " +
+                      "targets=" + string.Join(",", Array.ConvertAll(targets, t => t.ToString())));
+    }
+
+    static InputControlType ParseTarget(string name, InputControlType fallback)
+    {
+        if (string.IsNullOrEmpty(name)) return fallback;
+        try
         {
-            labels[i] = FallbackLabels[i];
-            labelContent[i] = new GUIContent(labels[i]);
+            return (InputControlType)Enum.Parse(typeof(InputControlType), name, true);
+        }
+        catch (Exception)
+        {
+            return fallback;
         }
     }
 
@@ -356,21 +394,27 @@ public class VirtualPad : MonoBehaviour
             if (t.phase != TouchPhase.Began) continue;
             var gui = ToGui(t.position);
 
-            if (stickFinger == -1 && InStickZone(gui))
-            {
-                stickFinger = t.fingerId;
-                stickOrigin = gui;
-                UpdateKnob(gui);
-                continue;
-            }
+            // A key placed inside the stick's zone is the one the user asked
+            // for; the zone is only a convenience. Keys win, and the editor is
+            // what keeps the overlap from being an accident.
+            var claimed = false;
             for (int b = 0; b < ButtonCount; b++)
             {
                 if (buttonFinger[b] != -1) continue;
-                if (Hit(b, gui))
-                {
-                    buttonFinger[b] = t.fingerId;
-                    break;
-                }
+                if (!Hit(b, gui)) continue;
+                buttonFinger[b] = t.fingerId;
+                claimed = true;
+                break;
+            }
+            if (claimed) continue;
+            if (stickFinger == -1 && InStickZone(gui))
+            {
+                stickFinger = t.fingerId;
+                // Pinned: the ring stays where it is drawn and the knob leans,
+                // so a finger lifted and put back resumes from the same centre
+                // instead of dragging the stick across the screen.
+                stickOrigin = layout.stick.mode == "pinned" ? StickRestCentre() : gui;
+                UpdateKnob(gui);
             }
         }
 
@@ -447,43 +491,40 @@ public class VirtualPad : MonoBehaviour
 
     void UpdateKnob(Vector2 guiPos)
     {
-        var max = KNOB_RANGE * STICK_RING_R * vmin();
+        var max = KNOB_RANGE * layout.stick.r * vmin();
         var delta = guiPos - stickOrigin;
         var clamped = Vector2.ClampMagnitude(delta, max);
         // GUI Y grows downward; the device expects stick-up as positive.
         stickKnob = new Vector2(clamped.x / max, -clamped.y / max);
     }
 
+    Vector2 StickRestCentre()
+    {
+        var s = layout.stick;
+        return new Vector2(s.cx * Screen.width, s.cy * Screen.height);
+    }
+
     bool InStickZone(Vector2 guiPos)
     {
-        return guiPos.x < STICK_ZONE_W * Screen.width &&
-               guiPos.y > (1f - STICK_ZONE_H) * Screen.height;
+        var s = layout.stick;
+        return guiPos.x >= s.zoneX0 * Screen.width &&
+               guiPos.x <= s.zoneX1 * Screen.width &&
+               guiPos.y >= s.zoneY0 * Screen.height &&
+               guiPos.y <= s.zoneY1 * Screen.height;
     }
 
     // ── geometry: one source for draw and hit-test ─────────────────────────
 
     static float vmin() => Mathf.Min(Screen.width, Screen.height);
 
-    static bool IsPill(int slot) => slot == (int)PadButton.Cast || slot >= (int)PadButton.Map;
+    bool IsPill(int slot) => Pad(slot).shape == "pill";
+
+    PadKeySpec Pad(int slot) => layout.keys[slot];
 
     Vector2 ButtonCentre(int slot)
     {
-        var cx = CLUSTER_CX * Screen.width;
-        var cy = CLUSTER_CY * Screen.height;
-        var off = DIAMOND_R * vmin();
-        switch ((PadButton)slot)
-        {
-            case PadButton.Dash: return new Vector2(cx, cy - off);          // top
-            case PadButton.Attack: return new Vector2(cx - off, cy);        // left
-            case PadButton.Jump: return new Vector2(cx, cy + off);          // bottom
-            case PadButton.Heal: return new Vector2(cx + off, cy);          // right
-            case PadButton.Throw: return new Vector2(THROW_CX * Screen.width, CAST_THROW_CY * vmin());
-            case PadButton.Cast: return new Vector2(CAST_CX * Screen.width, CAST_THROW_CY * vmin());
-            case PadButton.Inventory: return new Vector2(MAP_INV_CX * Screen.width, INV_CY * vmin());
-            case PadButton.Map: return new Vector2(MAP_INV_CX * Screen.width, MAP_CY * vmin());
-            case PadButton.Pause: return new Vector2(PILL_PAUSE_CX * Screen.width, PILL_PAUSE_CY * vmin());
-            default: return Vector2.zero;
-        }
+        var k = Pad(slot);
+        return new Vector2(k.x * Screen.width, k.y * Screen.height);
     }
 
     static Rect Centered(float cx, float cy, float w, float h) =>
@@ -503,15 +544,12 @@ public class VirtualPad : MonoBehaviour
     Rect ButtonRect(int slot)
     {
         if (mode == PadMode.Inventory) return InventoryRect(slot);
+        var k = Pad(slot);
         var c = ButtonCentre(slot);
-        if (slot == (int)PadButton.Pause)
-            return Centered(c.x, c.y, PILL_PAUSE_W * Screen.width, PILL_PAUSE_H * vmin());
-        if (slot == (int)PadButton.Cast || slot == (int)PadButton.Throw)
-            return Centered(c.x, c.y, CAST_THROW_W * Screen.width, CAST_THROW_H * vmin());
-        if (slot == (int)PadButton.Map || slot == (int)PadButton.Inventory)
-            return Centered(c.x, c.y, MAP_INV_W * Screen.width, MAP_INV_H * vmin());
-        var r = FACE_R * vmin();
-        return new Rect(c.x - r, c.y - r, r * 2f, r * 2f);
+        // Draw and hit use this one rect; a scale that changed only one of
+        // them would make a button that looks big and works small.
+        var scale = k.scale > 0f ? k.scale : 1f;
+        return Centered(c.x, c.y, k.w * vmin() * scale, k.h * vmin() * scale);
     }
 
     bool Hit(int slot, Vector2 guiPos) => ButtonRect(slot).Contains(guiPos);
@@ -546,10 +584,10 @@ public class VirtualPad : MonoBehaviour
         }
     }
 
-    static int SlotForControl(InputControlType control)
+    int SlotForControl(InputControlType control)
     {
-        for (int i = 0; i < Targets.Length; i++)
-            if (Targets[i] == control) return i;
+        for (int i = 0; i < ButtonCount; i++)
+            if (targets[i] == control) return i;
         return -1;
     }
 
@@ -640,7 +678,7 @@ public class VirtualPad : MonoBehaviour
         pillStyle = new GUIStyle(baseStyle);
         faceStyle = new GUIStyle(baseStyle)
         {
-            fontSize = Mathf.Max(10, (int)(FACE_R * vmin() * 2f * 0.22f)),
+            fontSize = Mathf.Max(10, (int)(Pad(OnScreenDevice.Jump).w * vmin() * 0.22f)),
         };
     }
 
@@ -682,32 +720,223 @@ public class VirtualPad : MonoBehaviour
         }
 
         var vminNow = vmin();
+        var s = layout.stick;
+        var ringR = s.r * vminNow;
+        var restCentre = StickRestCentre();
+        // Floating: the ring follows the finger. Pinned: it stays where it is
+        // drawn and only the knob leans, so lifting a finger and putting it
+        // back resumes from the same centre.
+        var floated = stickFinger != -1 && s.mode != "pinned";
+        var origin = floated ? stickOrigin : restCentre;
 
-        // Resting ring marks the stick zone even untouched.
-        if (stickFinger == -1)
+        GUI.color = stickFinger == -1 ? restTint : heldTint;
+        GUI.DrawTexture(new Rect(origin.x - ringR, origin.y - ringR,
+            ringR * 2f, ringR * 2f), CircleTexture(false));
+
+        if (stickFinger != -1)
         {
-            var restCentre = new Vector2(STICK_REST_X * Screen.width,
-                Screen.height - STICK_REST_Y * Screen.height);
-            GUI.color = restTint;
-            GUI.DrawTexture(new Rect(restCentre.x - STICK_RING_R * vminNow, restCentre.y - STICK_RING_R * vminNow,
-                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), CircleTexture(false));
-        }
-        else
-        {
-            var origin = stickOrigin;
-            GUI.color = heldTint;
-            GUI.DrawTexture(new Rect(origin.x - STICK_RING_R * vminNow, origin.y - STICK_RING_R * vminNow,
-                STICK_RING_R * 2f * vminNow, STICK_RING_R * 2f * vminNow), CircleTexture(false));
-            var knob = new Vector2(origin.x + stickKnob.x * KNOB_RANGE * STICK_RING_R * vminNow,
-                                   origin.y - stickKnob.y * KNOB_RANGE * STICK_RING_R * vminNow);
-            GUI.DrawTexture(new Rect(knob.x - STICK_RING_R * 0.55f * vminNow, knob.y - STICK_RING_R * 0.55f * vminNow,
-                STICK_RING_R * 1.1f * vminNow, STICK_RING_R * 1.1f * vminNow), CircleTexture(true));
+            var knob = new Vector2(origin.x + stickKnob.x * KNOB_RANGE * ringR,
+                                   origin.y - stickKnob.y * KNOB_RANGE * ringR);
+            GUI.DrawTexture(new Rect(knob.x - ringR * 0.55f, knob.y - ringR * 0.55f,
+                ringR * 1.1f, ringR * 1.1f), CircleTexture(true));
         }
 
         for (int b = 0; b < ButtonCount; b++)
             DrawButton(b, labelContent[b], restTint, heldTint);
 
         GUI.color = Color.white;
+    }
+}
+
+// ── the layout file ─────────────────────────────────────────────────────────
+
+// What pad-layout.json holds, and the rules for trusting it.
+//
+// Written by the launcher's pad editor, read here once per process. The file
+// is the whole reason a key can be moved without rebuilding the game: these
+// values are compiled INTO the player image otherwise, and an image is a
+// ten-minute conversion away.
+//
+// JsonUtility rather than a hand-rolled parser: the schema is three flat lists
+// of primitives, and a dependency-free reader that ignores unknown fields is
+// exactly what it does.
+
+[Serializable]
+public class PadKeySpec
+{
+    public string id;                 // stable name, for a future editor merge
+    public string target;             // InputControlType name, e.g. "Action2"
+    public float x, y;                // centre, fractions of width / height from top
+    public float w = 0.16f, h = 0.16f;// size, fractions of vmin
+    public string shape = "circle";   // circle | pill
+    public float scale = 1f;          // 0.5 .. 2
+    public string label;
+}
+
+[Serializable]
+public class PadStickSpec
+{
+    public string mode = "floating";  // floating | pinned
+    public float cx = 0.165f, cy = 0.70f;   // ring centre, from the left / top
+    public float r = 0.125f;                // ring radius, of vmin
+    // The touch zone, as corners rather than width/height from a corner: the
+    // editor moves it as a rectangle, and a rectangle that can only grow from
+    // one corner is half an editor.
+    public float zoneX0 = 0f, zoneY0 = 0.30f, zoneX1 = 0.40f, zoneY1 = 1f;
+}
+
+[Serializable]
+public class PadLayoutFile
+{
+    public int schema = 1;
+    public PadStickSpec stick = new PadStickSpec();
+    public PadKeySpec[] keys;
+
+    public const string FileName = "pad-layout.json";
+
+    /** Which of the two above answered, for the startup log. */
+    public static string Source = "defaults";
+
+    public static PadLayoutFile Load()
+    {
+        var path = Path.Combine(Application.persistentDataPath, FileName);
+        try
+        {
+            if (!File.Exists(path))
+            {
+                Source = "defaults";
+                return Defaults();
+            }
+            var text = File.ReadAllText(path);
+            var parsed = JsonUtility.FromJson<PadLayoutFile>(text);
+            if (parsed == null || !parsed.Valid())
+            {
+                Debug.LogWarning("[VPad] " + FileName + " does not describe a pad; using defaults");
+                Source = "defaults (file rejected)";
+                return Defaults();
+            }
+            parsed.Clamp();
+            Source = "file";
+            return parsed;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[VPad] " + FileName + " ignored: " + e.Message);
+            Source = "defaults (file unreadable)";
+            return Defaults();
+        }
+    }
+
+    /** Structure only: a file that fails this is not a layout at all. */
+    bool Valid()
+    {
+        if (schema != 1) return false;
+        if (keys == null || keys.Length != OnScreenDevice.ButtonCount) return false;
+        for (int i = 0; i < keys.Length; i++)
+            if (keys[i] == null) return false;
+        return true;
+    }
+
+    /**
+     * Values into a range the pad can survive.
+     *
+     * Clamped rather than rejected: a key dragged a little off screen by a
+     * newer editor should still be tappable, and a scale past the limit should
+     * be the limit rather than a button nobody can miss.
+     */
+    void Clamp()
+    {
+        if (stick == null) stick = new PadStickSpec();
+        stick.mode = stick.mode == "pinned" ? "pinned" : "floating";
+        stick.cx = Mathf.Clamp(stick.cx, 0f, 1f);
+        stick.cy = Mathf.Clamp(stick.cy, 0f, 1f);
+        stick.r = Mathf.Clamp(stick.r, 0.05f, 0.30f);
+        stick.zoneX0 = Mathf.Clamp(stick.zoneX0, 0f, 0.95f);
+        stick.zoneY0 = Mathf.Clamp(stick.zoneY0, 0f, 0.95f);
+        stick.zoneX1 = Mathf.Clamp(stick.zoneX1, stick.zoneX0 + 0.05f, 1f);
+        stick.zoneY1 = Mathf.Clamp(stick.zoneY1, stick.zoneY0 + 0.05f, 1f);
+        for (int i = 0; i < keys.Length; i++)
+        {
+            var k = keys[i];
+            k.x = Mathf.Clamp(k.x, -0.05f, 1.05f);
+            k.y = Mathf.Clamp(k.y, -0.05f, 1.05f);
+            k.w = Mathf.Clamp(k.w, 0.02f, 0.80f);
+            k.h = Mathf.Clamp(k.h, 0.02f, 0.80f);
+            k.scale = Mathf.Clamp(k.scale <= 0f ? 1f : k.scale, 0.5f, 2f);
+            if (k.shape != "pill") k.shape = "circle";
+        }
+    }
+
+    /**
+     * The layout a device that has never opened the editor gets.
+     *
+     * The old constants, to the pixel, with two corrections that were asked
+     * for: Map and Inventory sit above the stick's zone instead of inside it
+     * (they were at 0.40 and 0.30 of the height, and the zone is the bottom
+     * 70 % of the left 40 %), and Pause keeps a margin from the corner
+     * instead of sitting 14 px from it.
+     *
+     * Computed from Screen because the old units mixed width, height and vmin;
+     * on the landscape screens this game runs in, vmin is the height and the
+     * conversion is exact.
+     */
+    public static PadLayoutFile Defaults()
+    {
+        var vmin = Mathf.Min(Screen.width, Screen.height);
+        var wf = Screen.width / vmin;   // one vmin in width fractions
+        var hf = Screen.height / vmin;  // one vmin in height fractions
+        var off = 0.155f;               // diamond offset, in vmin
+        var face = 0.16f;               // face diameter, in vmin
+        const float clusterX = 0.845f;
+        const float clusterY = 0.60f;
+
+        PadKeySpec Key(int slot, string target, float x, float y, float w, float h,
+            string shape, string label) => new PadKeySpec
+        {
+            id = label.ToLowerInvariant(),
+            target = target,
+            x = x, y = y, w = w, h = h,
+            shape = shape,
+            scale = 1f,
+            label = label,
+        };
+
+        var keys = new PadKeySpec[OnScreenDevice.ButtonCount];
+        keys[OnScreenDevice.Jump] = Key(OnScreenDevice.Jump, "Action1",
+            clusterX, clusterY + off / hf, face, face, "circle", "Jump");
+        keys[OnScreenDevice.Cast] = Key(OnScreenDevice.Cast, "Action2",
+            0.906f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Cast");
+        keys[OnScreenDevice.Attack] = Key(OnScreenDevice.Attack, "Action3",
+            clusterX - off / wf, clusterY, face, face, "circle", "Attack");
+        keys[OnScreenDevice.Heal] = Key(OnScreenDevice.Heal, "Action2",
+            clusterX + off / wf, clusterY, face, face, "circle", "Heal");
+        keys[OnScreenDevice.Dash] = Key(OnScreenDevice.Dash, "RightTrigger",
+            clusterX, clusterY - off / hf, face, face, "circle", "Dash");
+        keys[OnScreenDevice.Map] = Key(OnScreenDevice.Map, "LeftBumper",
+            0.100f, 0.26f, 0.130f * wf, 0.075f * hf, "pill", "Map");
+        keys[OnScreenDevice.Inventory] = Key(OnScreenDevice.Inventory, "Select",
+            0.100f, 0.18f, 0.130f * wf, 0.075f * hf, "pill", "Inventory");
+        keys[OnScreenDevice.Throw] = Key(OnScreenDevice.Throw, "RightBumper",
+            0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Throw");
+        keys[OnScreenDevice.Pause] = Key(OnScreenDevice.Pause, "Start",
+            0.940f, 0.10f, 0.055f * wf, 0.075f * hf, "pill", "II");
+
+        return new PadLayoutFile
+        {
+            schema = 1,
+            stick = new PadStickSpec
+            {
+                mode = "floating",
+                cx = 0.165f,
+                cy = 0.70f,
+                r = 0.125f,
+                zoneX0 = 0f,
+                zoneY0 = 0.30f,
+                zoneX1 = 0.40f,
+                zoneY1 = 1f,
+            },
+            keys = keys,
+        };
     }
 }
 

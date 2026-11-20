@@ -144,6 +144,13 @@ player: ## Fetch Unity's Android player module (instead of installing Unity)
 check: ## Compile-check the patch sources against your depot (fast, thorough)
 	@pwsh -NoProfile -File tools/silksong-patches/check.ps1
 
+# Gesture, layout and JVM regressions for the pad and the second display.
+#
+# test.ps1 and test.sh are the same two suites; the bash twin exists so this
+# runs where PowerShell does not (the build container, and any Linux checkout).
+test: ## Gesture/layout/JVM regressions (pad, second display)
+	$(if $(shell command -v pwsh 2>/dev/null),pwsh -NoProfile -File tools/silksong-patches/test.ps1,bash tools/silksong-patches/test.sh)
+
 # The same question, asked about somebody else's mod.
 #
 # A plugin DLL references BepInEx and 0Harmony by name, and here those are our

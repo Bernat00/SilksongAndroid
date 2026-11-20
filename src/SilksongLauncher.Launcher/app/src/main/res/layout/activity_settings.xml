@@ -374,6 +374,23 @@
         android:layout_marginStart="4dp" />
 
     <Button
+        android:id="@+id/btn_settings_pad"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="On-screen pad"
+        android:textSize="15sp"
+        android:textColor="@color/text_on_control"
+        android:backgroundTint="@color/surface_control"
+        android:paddingStart="20dp"
+        android:paddingEnd="20dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:minHeight="0dp"
+        android:layout_gravity="start"
+        android:layout_marginStart="10dp"
+        android:layout_marginBottom="10dp" />
+
+    <Button
         android:id="@+id/btn_settings_back"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
