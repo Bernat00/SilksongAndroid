@@ -33,40 +33,63 @@ class PadEditorActivity : Activity() {
     private lateinit var canvas: PadCanvas
     private lateinit var status: TextView
     private lateinit var pinButton: Button
+    private lateinit var chromeTop: View
+    private lateinit var chromeBottom: View
+    private lateinit var peek: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        // The canvas has to be the game's canvas: same orientation, same area,
+        // nothing shaving a strip off the bottom. So: landscape, fullscreen,
+        // and the controls float over the layout instead of sitting beside it.
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+
+        val root = android.widget.FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#0D0A0B"))
-            setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
-        root.addView(TextView(this).apply {
+        canvas = PadCanvas()
+        root.addView(canvas, android.widget.FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#99000000"))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+        }
+        top.addView(TextView(this).apply {
             text = "On-screen pad"
             setTextColor(Color.WHITE)
-            textSize = 20f
+            textSize = 18f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         })
-        root.addView(TextView(this).apply {
+        top.addView(TextView(this).apply {
             text = "Drag to move · pinch to scale · tap the ring or the zone to select it. " +
                 "The game picks this up the next time it starts."
             setTextColor(Color.parseColor("#B5A9AC"))
-            textSize = 12f
-            setPadding(0, dp(6), 0, dp(10))
+            textSize = 11f
         })
 
-        canvas = PadCanvas()
-        root.addView(canvas, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#99000000"))
+            setPadding(dp(16), dp(8), dp(16), dp(10))
+        }
         status = TextView(this).apply {
             setTextColor(Color.parseColor("#B5A9AC"))
-            textSize = 12f
-            setPadding(0, dp(8), 0, dp(8))
+            textSize = 11f
+            setPadding(0, 0, 0, dp(6))
         }
-        root.addView(status)
+        bottom.addView(status)
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         pinButton = button("Stick: floating") { togglePin() }
@@ -74,11 +97,43 @@ class PadEditorActivity : Activity() {
         row.addView(button("Reset") { reset() }, weight())
         row.addView(button("Cancel") { finish() }, weight())
         row.addView(button("Save") { save() }, weight())
-        root.addView(row)
+        row.addView(button("Hide") { setChromeVisible(false) }, weight())
+        bottom.addView(row)
+
+        root.addView(top, android.widget.FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP))
+        root.addView(bottom, android.widget.FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM))
+
+        // A small way back when everything else is out of the way.
+        peek = TextView(this).apply {
+            text = "▾"
+            setTextColor(Color.parseColor("#B5A9AC"))
+            textSize = 16f
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setBackgroundColor(Color.parseColor("#66000000"))
+            setOnClickListener { setChromeVisible(true) }
+            visibility = View.GONE
+        }
+        root.addView(peek, android.widget.FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END).apply { topMargin = dp(8); marginEnd = dp(8) })
+
+        chromeTop = top
+        chromeBottom = bottom
 
         setContentView(root)
         canvas.load()
         updatePin()
+    }
+
+    /** The top and bottom strips, hidden together so the whole screen is visible. */
+    private fun setChromeVisible(visible: Boolean) {
+        chromeTop.visibility = if (visible) View.VISIBLE else View.GONE
+        chromeBottom.visibility = if (visible) View.VISIBLE else View.GONE
+        peek.visibility = if (visible) View.GONE else View.VISIBLE
     }
 
     private fun weight() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
