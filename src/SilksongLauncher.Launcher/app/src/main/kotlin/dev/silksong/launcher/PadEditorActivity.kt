@@ -37,6 +37,11 @@ class PadEditorActivity : Activity() {
     private lateinit var chromeBottom: View
     private lateinit var peek: TextView
 
+    private companion object {
+        /** Smallest stick zone, as a fraction of the screen. */
+        const val MIN_SPAN = 0.05f
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -200,12 +205,14 @@ class PadEditorActivity : Activity() {
         private var selectedStick = false
         private var selectedZone = false
         private var scaling = false
+        private var dragCorner = -1
         private var startDistance = 0f
         private var startValue = 0f
         private var lastX = 0f
         private var lastY = 0f
 
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = 2f * resources.displayMetrics.density
@@ -251,6 +258,18 @@ class PadEditorActivity : Activity() {
         private fun ringCentre() =
             android.graphics.PointF(layout.stick.cx * width, layout.stick.cy * height)
 
+        /** The four corner handles of the stick zone: independently x and y. */
+        private fun cornerRects(): List<RectF> {
+            val z = zoneRect()
+            val r = 9f * resources.displayMetrics.density
+            return listOf(
+                RectF(z.left - r, z.top - r, z.left + r, z.top + r),
+                RectF(z.right - r, z.top - r, z.right + r, z.top + r),
+                RectF(z.left - r, z.bottom - r, z.left + r, z.bottom + r),
+                RectF(z.right - r, z.bottom - r, z.right + r, z.bottom + r),
+            )
+        }
+
         fun overlappingKeys(): String? {
             val rects = layout.keys.map { keyRect(it) }
             for (i in rects.indices) {
@@ -271,6 +290,10 @@ class PadEditorActivity : Activity() {
             g.drawRect(zone, fill)
             stroke.color = if (selectedZone) Color.WHITE else Color.parseColor("#7D3341")
             g.drawRect(zone, stroke)
+            // Corner handles: x and y are separate spans on a phone screen, so
+            // resizing them together is the one thing a rectangle cannot mean.
+            handlePaint.color = if (selectedZone) Color.WHITE else Color.parseColor("#7D3341")
+            for (h in cornerRects()) g.drawCircle(h.centerX(), h.centerY(), h.width() / 2f, handlePaint)
 
             val centre = ringCentre()
             val radius = s.r * vmin()
@@ -309,9 +332,11 @@ class PadEditorActivity : Activity() {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     scaling = false
+                    dragCorner = -1
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
                     scaling = false
+                    dragCorner = -1
                 }
             }
             return true
@@ -344,10 +369,18 @@ class PadEditorActivity : Activity() {
                 invalidate()
                 return
             }
-            if (zoneRect().contains(x, y)) {
+            if (zoneRect().contains(x, y) || cornerRects().any { it.contains(x, y) }) {
                 deselect()
                 selectedZone = true
-                status.text = "Stick zone: drag to move, pinch its size"
+                // Which corner, if any: dragging a handle resizes one axis at
+                // a time (x and y are different spans and a phone screen is
+                // not square); the body itself moves the whole rectangle.
+                dragCorner = cornerRects().indexOfFirst { it.contains(x, y) }
+                status.text = if (dragCorner >= 0) {
+                    "Stick zone corner ${dragCorner + 1}: drag to resize x and y separately"
+                } else {
+                    "Stick zone: drag to move, pinch to resize, or grab a corner"
+                }
                 invalidate()
                 return
             }
@@ -371,12 +404,35 @@ class PadEditorActivity : Activity() {
                 s.cy = (s.cy + dy).coerceIn(0f, 1f)
             } else if (selectedZone) {
                 val s = layout.stick
-                val w = s.x1 - s.x0
-                val h = s.y1 - s.y0
-                s.x0 = (s.x0 + dx).coerceIn(0f, 1f - w)
-                s.y0 = (s.y0 + dy).coerceIn(0f, 1f - h)
-                s.x1 = s.x0 + w
-                s.y1 = s.y0 + h
+                if (dragCorner >= 0) {
+                    val nx = (x / width).coerceIn(0f, 1f)
+                    val ny = (y / height).coerceIn(0f, 1f)
+                    when (dragCorner) {
+                        0 -> {
+                            s.x0 = nx.coerceAtMost(s.x1 - MIN_SPAN)
+                            s.y0 = ny.coerceAtMost(s.y1 - MIN_SPAN)
+                        }
+                        1 -> {
+                            s.x1 = nx.coerceAtLeast(s.x0 + MIN_SPAN)
+                            s.y0 = ny.coerceAtMost(s.y1 - MIN_SPAN)
+                        }
+                        2 -> {
+                            s.x0 = nx.coerceAtMost(s.x1 - MIN_SPAN)
+                            s.y1 = ny.coerceAtLeast(s.y0 + MIN_SPAN)
+                        }
+                        else -> {
+                            s.x1 = nx.coerceAtLeast(s.x0 + MIN_SPAN)
+                            s.y1 = ny.coerceAtLeast(s.y0 + MIN_SPAN)
+                        }
+                    }
+                } else {
+                    val w = s.x1 - s.x0
+                    val h = s.y1 - s.y0
+                    s.x0 = (s.x0 + dx).coerceIn(0f, 1f - w)
+                    s.y0 = (s.y0 + dy).coerceIn(0f, 1f - h)
+                    s.x1 = s.x0 + w
+                    s.y1 = s.y0 + h
+                }
             } else {
                 return
             }
