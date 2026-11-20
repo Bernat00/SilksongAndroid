@@ -33,6 +33,29 @@ object BuildInstallation {
         return data.isFile && data.length() > 0 && engine.isFile && engine.length() > 0
     }
 
+    /** Whether a previous build left the engine and player image behind. */
+    fun hasOutputs(pkg: File): Boolean = haveOutputs(pkg)
+
+    /** The signature the installed build was made with, or null when there is no marker. */
+    fun builtSignature(pkg: File): String? =
+        marker(pkg).takeIf { it.isFile }?.let { runCatching { it.readText().trim() }.getOrNull() }
+
+    /**
+     * A finished build whose inputs this APK no longer matches.
+     *
+     * Separate from [isReady] because the answer is not "no game": outputs and
+     * a marker are both there, and the only thing at stake is whether the
+     * patches shipped in this APK are in the game on disk. That difference is
+     * the one the setup screen can offer a choice about -- play the build that
+     * exists, or rebuild to take the new patches -- instead of treating an app
+     * update as a machine with no game on it.
+     */
+    fun isStale(pkg: File, signature: String): Boolean {
+        if (!haveOutputs(pkg)) return false
+        val built = builtSignature(pkg) ?: return false
+        return built != signature
+    }
+
     fun isReady(pkg: File, signature: String): Boolean {
         val marker = marker(pkg)
         if (!haveOutputs(pkg) || !marker.isFile) return false

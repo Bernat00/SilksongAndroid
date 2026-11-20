@@ -50,6 +50,11 @@ native), and 30–60 min when attempts are reclaimed (see below). The phone has 
 stay idle. `SetupActivity` is only declared when the launcher is in the APK —
 its declaration is in the manifest `build.sh` generates, not the AAR's.
 
+A conversion tier can ride along with that rebuild, which is the loop where the
+port screen is skipped because the launcher already has a build:
+`--es dev.silksong.launcher.extra.TIER 6:1792` (`8:2560`, `3:896`, `1:448`, or
+`auto` to clear it).
+
 ## Verification, cheapest first
 
 | | |
@@ -97,6 +102,16 @@ service with no foreground service declared.
 `tools/ondevice-il2cpp/build-il2cpp.sh` sizes compile jobs as
 `(MemAvailable - 512 MB) / 400 MB`, so a cold rebuild right after a conversion
 (≈1.3 GB free) runs 2 jobs on 8 cores; `BUILD_JOBS` overrides it.
+
+The port screen lets the user override the starting tier: chips `Auto | 8·2560 |
+6·1792 | 3·896 | 1·448`, stored as `il2cpp_budget` (`"auto"` or `"cores:heapMb"`)
+in `launcher_settings`. `Auto` is the free-RAM tier capped by the total-RAM tier
+and by the S23+ 1792 MB limit, so a smaller phone can never be handed more than
+it used to get; an explicit choice is honoured, clamped to real cores, and the
+chosen rule is logged. The same screen shows live `MemAvailable` once a second
+while it is resumed, red under 3.4 GB. A built game whose staged-asset digest no
+longer matches shows as **"The patches are newer than the game"** (Rebuild /
+Play anyway) rather than as a device with no game on it.
 
 ## Traps
 

@@ -60,6 +60,21 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * Free memory, in MB, at which each conversion tier has been observed to work.
+ *
+ * Not total RAM: the same 8 GB phone can have 2 or 4 GB free depending on what
+ * the user left open, and that difference decided every run in the logs.
+ * Top-level rather than inside [MonoRuntime] so the nested [MonoRuntime.Memory]
+ * can read them without the object's private accessors.
+ */
+private const val COMFORTABLE_MB = 3400L
+private const val TIGHT_MB = 2600L
+private const val DESPERATE_MB = 1800L
+
+/** The smallest tier offered, and the one the retry ladder bottoms out above. */
+private const val SMALLEST_TIER_MB = 448
+
 object MonoRuntime {
 
     /** Where the class library is unpacked to. */
@@ -174,6 +189,12 @@ object MonoRuntime {
             "MONO_GC_PARAMS" to "major=marksweep,nursery-size=4m,soft-heap-limit=${heapMb}m",
         )
 
+        /** "6 cores · 1792 MB", for the port screen. */
+        fun label(): String = if (cores == 1) "1 core · $heapMb MB" else "$cores cores · $heapMb MB"
+
+        /** "6:1792" -- the form [SettingsStore.il2cppBudget] and [parseBudget] use. */
+        fun setting(): String = "$cores:$heapMb"
+
         /**
          * The next step down, for a run that has already been reclaimed once.
          *
@@ -263,23 +284,130 @@ object MonoRuntime {
     }
 
     /**
-     * The starting budget for the conversion, not for every tool.
+     * The starting budget for the conversion, and the one decision the port
+     * screen asks the user to make.
      *
-     * The SM-S916 family (Galaxy S23+) reliably reaches the end of the 2560 MB
-     * tier and is reclaimed there, so it pays for a full attempt before the
-     * 1792 MB retry. Start at that proven tier on this model instead. The
-     * conversion is slower per file, but one attempt instead of two is faster
-     * overall and does not depend on the OS reclaiming cleanly.
+     * Total RAM is the wrong input, and it is what this used to use: an S23+
+     * reports 6.9 GB of a 7.24 GB device and starts the largest tier even when
+     * only 2.1 GB is actually free, then loses the process around file 900 of
+     * 1162. Every attempt in that phone's log which began with 3.2 GB or more
+     * free finished, and every one at 2.9 GB or less was reclaimed. Free
+     * memory is the variable that decides it, so that is what "automatic"
+     * reads.
+     *
+     * An explicit choice wins over automatic, because the person holding the
+     * phone knows things this code cannot: that they just rebooted, or that
+     * the case makes it run hot and they would rather take twice as long. It
+     * is still clamped to the cores that exist.
      */
     fun il2cppBudget(context: Context): Budget {
-        val base = budget(context)
-        if (Build.MODEL.startsWith("SM-S916", ignoreCase = true)) {
-            val tuned = Budget(base.cores.coerceAtMost(6), 1792)
-            LauncherLog.log("il2cpp: ${Build.MODEL} starts at $tuned (first tier reclaimed on this model)")
-            return tuned
+        val automatic = autoBudget(context)
+        val chosen = SettingsStore(context).il2cppBudget
+        if (chosen == BUDGET_AUTO) {
+            LauncherLog.log("il2cpp: automatic $automatic, ${memory(context)}")
+            return automatic
         }
-        return base
+        val parsed = parseBudget(chosen)
+        if (parsed == null) {
+            LauncherLog.log("il2cpp: unreadable budget setting '$chosen'; using automatic $automatic")
+            return automatic
+        }
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val clamped = Budget(parsed.cores.coerceAtMost(cores), parsed.heapMb)
+        LauncherLog.log("il2cpp: chosen $clamped (automatic would be $automatic), ${memory(context)}")
+        return clamped
     }
+
+    /**
+     * The explicit tiers the port screen offers, largest first.
+     *
+     * Fixed rather than derived from the device: these are the budgets that
+     * have been run on this game's hardware, and a phone offering a tier
+     * nobody has tested is a phone offering a way to lose an hour.
+     */
+    val CHOICES: List<Budget> = listOf(
+        Budget(8, 2560),
+        Budget(6, 1792),
+        Budget(3, 896),
+        Budget(1, SMALLEST_TIER_MB),
+    )
+
+    /**
+     * The tier free memory supports right now, never more than total RAM alone
+     * would have allowed.
+     *
+     * Two bounds, because they answer different questions. Free memory says
+     * what the device can spare *at this moment* -- 3.4 GB and up ran the
+     * largest tier here, 2.6-3.4 GB is the band the 1792 MB retry survived in,
+     * and below that only the small tiers have ever finished. Total RAM says
+     * what the device was ever designed to take, which is what [budget] has
+     * always decided.
+     *
+     * The second bound is what keeps this from being a regression: a 4 GB
+     * phone can have 2.6 GB free and would otherwise be handed 3 cores/896 MB
+     * by the free-memory rule, when it used to get 1/384 -- more memory, on the
+     * device least able to spare it, because the thresholds were measured on
+     * 8 GB phones. Taking the smaller of the two means free memory can only
+     * ever make the choice more conservative, never more generous.
+     *
+     * The S23+ is then capped at 1792 MB even when it has room, because that is
+     * the only tier this model has been observed to finish; the explicit
+     * choices on the port screen are how someone asks for more.
+     */
+    fun autoBudget(context: Context): Budget {
+        val mem = memoryNow(context)
+        val free = when {
+            mem.availMb >= COMFORTABLE_MB -> Budget(8, 2560)
+            mem.availMb >= TIGHT_MB -> Budget(6, 1792)
+            mem.availMb >= DESPERATE_MB -> Budget(3, 896)
+            else -> Budget(1, SMALLEST_TIER_MB)
+        }
+        val ceiling = budget(context)
+        val bounded =
+            if (free.heapMb > ceiling.heapMb) {
+                Budget(free.cores.coerceAtMost(ceiling.cores), ceiling.heapMb)
+            } else {
+                free
+            }
+        val tuned =
+            if (Build.MODEL.startsWith("SM-S916", ignoreCase = true) && bounded.heapMb > 1792) {
+                Budget(6, 1792)
+            } else {
+                bounded
+            }
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        return Budget(tuned.cores.coerceAtMost(cores), tuned.heapMb)
+    }
+
+    /** "6:1792" -> Budget(6, 1792). Null for anything else, including "" and "auto". */
+    fun parseBudget(value: String): Budget? {
+        val parts = value.split(':')
+        if (parts.size != 2) return null
+        val cores = parts[0].trim().toIntOrNull() ?: return null
+        val heap = parts[1].trim().toIntOrNull() ?: return null
+        if (cores < 1 || heap < FLOOR_HEAP_MB) return null
+        return Budget(cores, heap)
+    }
+
+    /** The device's memory right now, in megabytes, for the screen that shows it. */
+    data class Memory(val totalMb: Long, val availMb: Long) {
+        val comfortable: Boolean get() = availMb >= COMFORTABLE_MB
+    }
+
+    /**
+     * One reading of free memory.
+     *
+     * [ActivityManager.MemoryInfo] rather than /proc/meminfo: it is the number
+     * the platform itself uses to decide who gets reclaimed, it needs no
+     * permission, and it is cheap enough to poll once a second while the port
+     * screen is visible.
+     */
+    fun memoryNow(context: Context): Memory = runCatching {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        Memory(mi.totalMem / (1024L * 1024L), mi.availMem / (1024L * 1024L))
+    }.getOrDefault(Memory(0, 0))
 
     /**
      * Runs a .NET program in a builder process and collects what it printed.

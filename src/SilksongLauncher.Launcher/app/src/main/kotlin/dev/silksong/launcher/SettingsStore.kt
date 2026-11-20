@@ -17,6 +17,14 @@ import android.content.Context
 import android.content.SharedPreferences
 import java.io.File
 
+/**
+ * The value [SettingsStore.il2cppBudget] stores when the device decides the
+ * conversion tier. File-level rather than in [SettingsStore]'s companion,
+ * because that object is private (see its keys) and both the port screen and
+ * [MonoRuntime] have to name this one value.
+ */
+const val BUDGET_AUTO = "auto"
+
 class SettingsStore(context: Context) {
 
     // Held so every write can re-derive the exported file immediately:
@@ -164,6 +172,25 @@ class SettingsStore(context: Context) {
         set(value) { changed(KEY_GOG_AUTO_PUSH, value) }
 
     /**
+     * Which share of the device the IL2CPP conversion is allowed to take, as
+     * "cores:heapMb", or "auto" to let [MonoRuntime.il2cppBudget] choose from
+     * what is actually free at the moment the button is pressed.
+     *
+     * Launcher-only and deliberately not exported to the game: nothing on the
+     * Unity side runs a conversion, and a setting the game cannot use is a
+     * setting somebody will eventually try to make it use (see exportForGame).
+     *
+     * A string rather than an enum because this is a budget, not a mode: a
+     * value a later version cannot parse has to fall back to automatic rather
+     * than fail to load the screen it is read on.
+     */
+    var il2cppBudget: String
+        get() = prefs.getString(KEY_IL2CPP_BUDGET, BUDGET_AUTO) ?: BUDGET_AUTO
+        set(value) {
+            prefs.edit().putString(KEY_IL2CPP_BUDGET, value).apply()
+        }
+
+    /**
      * Hands the game the settings it needs, as a file it can read.
      *
      * The launcher runs in its own process, so the game cannot read these
@@ -223,5 +250,6 @@ class SettingsStore(context: Context) {
         const val KEY_TOUCH_OVERLAY = "touch_overlay"
         const val KEY_GOG_AUTO_PULL = "gog_auto_pull"
         const val KEY_GOG_AUTO_PUSH = "gog_auto_push"
+        const val KEY_IL2CPP_BUDGET = "il2cpp_budget"
     }
 }

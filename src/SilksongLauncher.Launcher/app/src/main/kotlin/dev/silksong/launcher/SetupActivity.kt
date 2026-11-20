@@ -34,6 +34,7 @@ package dev.silksong.launcher
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -49,11 +50,15 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 class SetupActivity : Activity() {
 
@@ -70,6 +75,19 @@ class SetupActivity : Activity() {
          * and it is checked separately by [modsPending].
          */
         const val EXTRA_REBUILD = "dev.silksong.launcher.extra.REBUILD"
+
+        /**
+         * A conversion tier chosen from the command line, e.g.
+         * `adb shell am start -n <pkg>/dev.silksong.launcher.SetupActivity
+         * --ez ...extra.REBUILD true --es ...extra.TIER 6:1792`.
+         *
+         * The chips on this screen are for choosing interactively; this is the
+         * same choice for the loop where somebody is rebuilding the same thing
+         * over and over, where the screen is skipped entirely because the
+         * launcher already has a build and asks to rebuild it. "auto" is
+         * accepted and clears an earlier choice.
+         */
+        const val EXTRA_TIER = "dev.silksong.launcher.extra.TIER"
 
         /**
          * "Reset the build", decided on the screen that sent us here.
@@ -110,6 +128,37 @@ class SetupActivity : Activity() {
     private lateinit var resetBuild: Button
     private lateinit var changeFolder: Button
     private var busy = false
+
+    /**
+     * The port screen's one tuning control, with the memory reading above it.
+     *
+     * Deliberately the only knob on this screen -- the rest of the pipeline is
+     * not a decision anybody can usefully make (see the file header). This one
+     * is, because the conversion is the step Android reclaims, and how much
+     * memory is actually free when the button is pressed is what decides
+     * whether it survives to the end.
+     */
+    private lateinit var tuning: LinearLayout
+    private lateinit var memoryLine: TextView
+    private lateinit var budgetRow: LinearLayout
+    private val budgetChips = mutableListOf<Button>()
+
+    /** The once-a-second memory reading, alive only while the screen is. */
+    private var ticker: Job? = null
+
+    /**
+     * Whether the tier chips are shown at all.
+     *
+     * A developer control, not a product one: choosing the conversion budget by
+     * hand is a way to lose an hour if you are not the person who measured the
+     * tiers, so it exists in a debuggable build and nowhere else. Every dev APK
+     * is debuggable (`DEBUGGABLE=1` in the container); a release build is not.
+     * The intent extra is left working either way, because reaching it means
+     * having adb access already.
+     */
+    private val chipsAllowed: Boolean by lazy {
+        (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
     // Set by an action to explain what just happened; cleared when the next
     // one starts. Null means the state summary is shown instead.
     private var message: String? = null
@@ -145,6 +194,13 @@ class SetupActivity : Activity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    override fun onPause() {
+        super.onPause()
+        // Nothing polls the device while this screen is not on it.
+        ticker?.cancel()
+        ticker = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
@@ -158,6 +214,19 @@ class SetupActivity : Activity() {
         scope.launch {
             withContext(Dispatchers.IO) { Toolchain.canExecute(Toolchain.rootFor(this@SetupActivity)) }
             if (!busy) refresh()
+        }
+        // A tier named on the command line is applied before anything else, so
+        // it is already the setting by the time the rebuild below reads it.
+        if (savedInstanceState == null) {
+            intent?.getStringExtra(EXTRA_TIER)?.let { tier ->
+                if (tier == BUDGET_AUTO || MonoRuntime.parseBudget(tier) != null) {
+                    SettingsStore(this).il2cppBudget = tier
+                    LauncherLog.log("il2cpp: budget set from the launch intent: $tier")
+                } else {
+                    LauncherLog.log("il2cpp: ignoring unreadable tier extra '$tier'")
+                }
+                intent.removeExtra(EXTRA_TIER)
+            }
         }
         // The rebuild was already agreed to on the screen that sent us here,
         // so it starts rather than being put behind another button. Only on a
@@ -179,6 +248,7 @@ class SetupActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        startTicker()
         if (busy) return
         // Anything already downloaded is moved into place without being asked
         // for: the user has no way of knowing that a file in one directory has
@@ -323,6 +393,9 @@ class SetupActivity : Activity() {
         }
         root.addView(detail)
 
+        tuning = buildTuning()
+        root.addView(tuning)
+
         // Hidden until something is actually running: a bar sitting at zero
         // reads as broken.
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -393,6 +466,154 @@ class SetupActivity : Activity() {
     }
 
     /**
+     * Live free memory, and the tiers to choose from.
+     *
+     * One text line that updates while the screen is visible and a row of chips
+     * whose selected one the next conversion will use. "Auto" resolves live,
+     * so the line doubles as the recommendation: it says which tier the device
+     * would pick for itself at this moment, and why the number matters.
+     *
+     * Chips rather than a spinner because this screen is built in code from a
+     * fixed palette (see the file header): a spinner would inherit whatever
+     * text colour the device theme chose and put it on this near-black
+     * background, and the value being displayed is four short strings.
+     */
+    private fun buildTuning(): LinearLayout {
+        val block = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 0, 0, dp(14))
+        }
+        memoryLine = text("", 13f, Color.parseColor("#B5A9AC"))
+        block.addView(memoryLine)
+        block.addView(text(
+            buildString {
+                append(
+                    "Below about 3.4 GB free, Android usually stops the conversion " +
+                        "part-way and it starts again from the first file; restarting " +
+                        "the phone frees the most.",
+                )
+                if (chipsAllowed) append(" Chips are cores · MB.")
+            },
+            12f,
+            Color.parseColor("#7A6E71"),
+        ).apply { setPadding(0, dp(4), 0, dp(10)) })
+
+        val stored = SettingsStore(this).il2cppBudget
+        // A stored value this version cannot read is not a choice: reset it to
+        // automatic rather than leave the screen showing a tier it will not use.
+        if (stored != BUDGET_AUTO && MonoRuntime.parseBudget(stored) == null) {
+            SettingsStore(this).il2cppBudget = BUDGET_AUTO
+        }
+
+        budgetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val values = listOf(BUDGET_AUTO) + MonoRuntime.CHOICES.map { it.setting() }
+        for (value in values) {
+            val chip = Button(this).apply {
+                text = if (value == BUDGET_AUTO) {
+                    "Auto"
+                } else {
+                    value.replace(':', '·')
+                }
+                textSize = 12f
+                isAllCaps = false
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                setOnClickListener {
+                    SettingsStore(this@SetupActivity).il2cppBudget = value
+                    LauncherLog.log("il2cpp: budget chosen on the port screen: $value")
+                    markChoice(value)
+                    updateMemory()
+                }
+            }
+            budgetChips.add(chip)
+            budgetRow.addView(chip, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            })
+        }
+        block.addView(budgetRow)
+        if (!chipsAllowed) budgetRow.visibility = View.GONE
+        markChoice(SettingsStore(this).il2cppBudget)
+        return block
+    }
+
+    /** Tints the chosen chip and leaves the rest quiet. */
+    private fun markChoice(value: String) {
+        for ((index, chip) in budgetChips.withIndex()) {
+            val chipValue = if (index == 0) {
+                BUDGET_AUTO
+            } else {
+                MonoRuntime.CHOICES[index - 1].setting()
+            }
+            val on = chipValue == value
+            chip.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                Color.parseColor(if (on) "#7D3341" else "#2A2426"),
+            )
+            chip.setTextColor(if (on) Color.WHITE else Color.parseColor("#B5A9AC"))
+        }
+    }
+
+    /**
+     * One reading of free memory, and what the next conversion would use.
+     *
+     * Polled once a second while the activity is resumed: this number moves on
+     * its own as the phone reclaims things, and it is the input to a decision
+     * about a run that lasts half an hour.
+     */
+    private fun updateMemory() {
+        if (!::memoryLine.isInitialized) return
+        val mem = MonoRuntime.memoryNow(this)
+        if (mem.totalMb <= 0) {
+            memoryLine.text = "Free memory unknown"
+            return
+        }
+        val auto = MonoRuntime.autoBudget(this)
+        val chosen = MonoRuntime.parseBudget(SettingsStore(this).il2cppBudget)
+        val which = if (chosen == null) {
+            "automatic: ${auto.label()}"
+        } else {
+            "chosen: ${chosen.label()}  (automatic would be ${auto.label()})"
+        }
+        memoryLine.text = String.format(
+            Locale.US,
+            "%.1f GB free of %.1f GB   ·   %s",
+            mem.availMb / 1024.0,
+            mem.totalMb / 1024.0,
+            which,
+        )
+        memoryLine.setTextColor(
+            Color.parseColor(if (mem.comfortable) "#B5A9AC" else "#D4576A"),
+        )
+    }
+
+    private fun startTicker() {
+        if (ticker?.isActive == true) return
+        ticker = scope.launch {
+            while (isActive) {
+                updateMemory()
+                delay(1000)
+            }
+        }
+    }
+
+    /**
+     * A finished build that this APK's patches are newer than.
+     *
+     * The marker stores the digest of the patch sources the game was built
+     * from, so an app update that carries no patch change matches it and is
+     * never asked about; one that does carry a change produces this state,
+     * which offers the rebuild as a choice rather than as a gate.
+     */
+    private fun staleBuild(): Boolean = try {
+        BuildInstallation.isStale(pkgDir, buildSignature)
+    } catch (t: Throwable) {
+        LauncherLog.log("Could not compare the installed build marker: $t")
+        false
+    }
+
+    /**
      * The two quiet actions, which are recovery tools rather than a menu.
      *
      * Both are gone once the game is built. This screen is not where a built
@@ -431,6 +652,7 @@ class SetupActivity : Activity() {
         val built = isBuilt()
         val haveGame = haveGameFiles()
         val foreign = wrongBuild()
+        val stale = !built && staleBuild()
 
         when {
             // Ahead of the plain built case, and the only state where this
@@ -456,6 +678,23 @@ class SetupActivity : Activity() {
                 primary.text = "Play"
                 primary.visibility = View.VISIBLE
                 secondary.visibility = View.GONE
+            }
+            // A game that exists, built from patch sources this APK no longer
+            // ships. The build is complete and playable; what is missing is the
+            // patches. Offering the choice is the point -- an app update is not
+            // a reason to make somebody sit through a rebuild to keep playing.
+            stale -> {
+                status.text = message ?: "The patches are newer than the game"
+                detail.text =
+                    "This version of the app carries patches that the installed game was " +
+                    "not built with, so they are not in it yet.\n\n" +
+                    "Rebuilding only redoes what changed, not the half hour the first build " +
+                    "took. Playing anyway is fine: the game is complete, it just does not " +
+                    "have these patches."
+                primary.text = "Rebuild"
+                primary.visibility = View.VISIBLE
+                secondary.text = "Play anyway"
+                secondary.visibility = View.VISIBLE
             }
             // Ahead of "ready to port", and ahead of a Steam download that
             // would otherwise unpack the Linux depot on top of this one and
@@ -509,6 +748,10 @@ class SetupActivity : Activity() {
         primary.isEnabled = true
         secondary.isEnabled = true
         updateReset(built)
+        // The memory reading and the tier chips belong to the two states that
+        // start a build; nothing else on this screen has anything to tune.
+        tuning.visibility = if (readyToPort || haveGame || stale) View.VISIBLE else View.GONE
+        if (tuning.visibility == View.VISIBLE) updateMemory()
     }
 
     /**
@@ -535,6 +778,11 @@ class SetupActivity : Activity() {
         if (running) message = null
         primary.visibility = if (running) View.GONE else View.VISIBLE
         secondary.visibility = if (running) View.GONE else View.VISIBLE
+        // The chips go with the buttons they modify; the memory reading stays,
+        // because during a conversion it is the number the outcome depends on.
+        if (::budgetRow.isInitialized) {
+            budgetRow.visibility = if (running || !chipsAllowed) View.GONE else View.VISIBLE
+        }
         updateReset()
         progress.visibility = if (running) View.VISIBLE else View.INVISIBLE
         stepLabel.visibility = if (running && stepNumber > 0) View.VISIBLE else View.GONE
@@ -615,8 +863,9 @@ class SetupActivity : Activity() {
     private fun onSecondary() {
         // "Play anyway", which is the only thing this button is when a build
         // exists: the folder picker is never offered beside one, because the
-        // depot is part of isBuilt.
-        if (isBuilt()) {
+        // depot is part of isBuilt. A stale build counts: it is a game, and the
+        // only thing it is missing is patches this APK carries.
+        if (isBuilt() || staleBuild()) {
             startLauncher()
             return
         }
