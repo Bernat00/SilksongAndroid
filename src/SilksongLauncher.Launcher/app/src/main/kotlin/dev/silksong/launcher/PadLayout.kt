@@ -165,9 +165,14 @@ class PadLayout(
 
         /** Same order as OnScreenDevice's slots: Jump, Cast, Attack, Heal, Dash, Map, Inventory, Throw, Pause. */
         fun defaults(width: Int, height: Int): PadLayout {
+            // A view that has not been laid out yet reports 0, and 0/0 here
+            // used to put the face diamond at infinity: text still drew (its
+            // position is the rect's centre) while every shape vanished. The
+            // guard keeps the arithmetic finite; the caller loads again once
+            // it has a size.
             val vmin = minOf(width, height).toFloat().coerceAtLeast(1f)
-            val wf = width / vmin   // one vmin in width fractions
-            val hf = height / vmin  // one vmin in height fractions
+            val wf = (width / vmin).coerceAtLeast(0.01f)   // one vmin in width fractions
+            val hf = (height / vmin).coerceAtLeast(0.01f)  // one vmin in height fractions
             val off = 0.155f
             val face = 0.16f
             fun key(id: String, target: String, x: Float, y: Float, w: Float, h: Float,

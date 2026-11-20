@@ -571,10 +571,13 @@ class SetupActivity : Activity() {
         }
         val auto = MonoRuntime.autoBudget(this)
         val chosen = MonoRuntime.parseBudget(SettingsStore(this).il2cppBudget)
-        val which = if (chosen == null) {
-            "automatic: ${auto.label()}"
-        } else {
-            "chosen: ${chosen.label()}  (automatic would be ${auto.label()})"
+        val running = MonoRuntime.runningBudget
+        val which = when {
+            // A conversion in flight owns the line: it is the only moment the
+            // answer changes on its own, and a fallback has to be visible.
+            running != null -> "running: ${running.label()}"
+            chosen == null -> "automatic: ${auto.label()}"
+            else -> "chosen: ${chosen.label()}  (automatic would be ${auto.label()})"
         }
         memoryLine.text = String.format(
             Locale.US,

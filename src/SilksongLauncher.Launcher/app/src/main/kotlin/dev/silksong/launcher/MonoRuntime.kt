@@ -284,6 +284,17 @@ object MonoRuntime {
     }
 
     /**
+     * The tier the conversion is running at, or null when it is not running.
+     *
+     * Written by [Il2cppConverter] around each attempt and read by the port
+     * screen: after a reclaim the tier on screen has to be the one now
+     * running, not the one that started, or the number people watch lies at
+     * exactly the moment it matters.
+     */
+    @Volatile
+    var runningBudget: Budget? = null
+
+    /**
      * The starting budget for the conversion, and the one decision the port
      * screen asks the user to make.
      *

@@ -161,6 +161,13 @@ class PadEditorActivity : Activity() {
         }
 
         fun load() {
+            // Called from onCreate before the first layout: a zero-sized view
+            // cannot produce a layout, so wait for one rather than computing
+            // with 0 (see PadLayout.defaults).
+            if (width <= 0 || height <= 0) {
+                post { load() }
+                return
+            }
             layout = PadLayout.load(this@PadEditorActivity, width, height)
             invalidate()
         }

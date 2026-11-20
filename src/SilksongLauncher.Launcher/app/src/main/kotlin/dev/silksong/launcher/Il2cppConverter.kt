@@ -451,18 +451,29 @@ object Il2cppConverter {
         }
 
         var budget = MonoRuntime.il2cppBudget(context)
-        var result = attempt(budget)
-        // Reclaimed rather than failed: the settings were too generous for
-        // this device as it stood, so the same work is offered a smaller share
-        // of it. Only for that one cause -- a conversion that threw is a
-        // conversion that will throw again, and retrying it costs the user
-        // another six minutes to reach the same message.
-        while (result.outOfMemory) {
-            val next = budget.tighter() ?: break
-            budget = next
-            LauncherLog.log("il2cpp: reclaimed for memory; retrying with $budget")
-            send(Progress("Converting to C++", 0f, "retrying with less memory"))
-            result = attempt(budget)
+        // The screen shows this while the run is going: after a reclaim the
+        // tier on screen has to be the one now running, not the one that
+        // started, or the number people watch lies at exactly the moment it
+        // matters.
+        MonoRuntime.runningBudget = budget
+        var result = try {
+            var first = attempt(budget)
+            // Reclaimed rather than failed: the settings were too generous for
+            // this device as it stood, so the same work is offered a smaller
+            // share of it. Only for that one cause -- a conversion that threw
+            // is a conversion that will throw again, and retrying it costs the
+            // user another six minutes to reach the same message.
+            while (first.outOfMemory) {
+                val next = budget.tighter() ?: break
+                budget = next
+                MonoRuntime.runningBudget = budget
+                LauncherLog.log("il2cpp: reclaimed for memory; retrying with $budget")
+                send(Progress("Converting to C++", 0f, "retrying with $budget"))
+                first = attempt(budget)
+            }
+            first
+        } finally {
+            MonoRuntime.runningBudget = null
         }
         val seconds = (System.currentTimeMillis() - started) / 1000
 
