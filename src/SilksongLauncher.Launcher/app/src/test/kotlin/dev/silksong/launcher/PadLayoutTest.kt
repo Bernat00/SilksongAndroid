@@ -75,8 +75,18 @@ class PadLayoutTest {
     }
 
     @Test
-    fun theBuiltInLayoutIsSaveable() {
-        // The report that started this: Save refused the default layout,
+    fun onlyTheToolKeyAimsForYou() {
+        // Skill and Tool share RightBumper in the game; the difference is the
+        // aim assist, so exactly one key may carry it, and it must be Tool.
+        val layout = PadLayout.defaults(w, h)
+        val aiming = layout.keys.filter { it.aimUp }
+        assertEquals(1, aiming.size)
+        assertEquals("Tool", aiming.single().label)
+        assertEquals("RightBumper", aiming.single().target)
+    }
+
+    @Test
+    fun theBuiltInLayoutIsSaveable() {        // The report that started this: Save refused the default layout,
         // because the face diamond overlaps on purpose (0.155 vmin apart, 0.080
         // radius) and the check compared bounding squares.
         val defaults = PadLayout.defaults(w, h)

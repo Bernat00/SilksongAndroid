@@ -191,9 +191,9 @@ public class VirtualPad : MonoBehaviour
     static readonly InputControlType[] FallbackTargets =
     {
         InputControlType.Action1,       // Jump
-        InputControlType.Action2,       // Cast
+        InputControlType.RightBumper,   // Skill (casts the Silk Skill)
         InputControlType.Action3,       // Attack
-        InputControlType.Action2,       // Heal (same action as Cast)
+        InputControlType.Action2,       // Bind (hold to heal)
         InputControlType.RightTrigger,  // Dash
         InputControlType.LeftBumper,    // Map
         InputControlType.Select,        // Inventory
@@ -203,7 +203,7 @@ public class VirtualPad : MonoBehaviour
 
     static readonly string[] FallbackLabels =
     {
-        "Jump", "Cast", "Attack", "Heal", "Dash",
+        "Jump", "Skill", "Attack", "Bind", "Dash",
         "Map", "Inventory", "Tool", "II",
     };
 
@@ -269,7 +269,15 @@ public class VirtualPad : MonoBehaviour
         // them aims up for you (see RoutePlayTouches).
         toolMask = 0;
         for (int i = 0; i < ButtonCount; i++)
-            if (targets[i] == InputControlType.RightBumper) toolMask |= 1 << i;
+            if (layout.keys[i] != null && layout.keys[i].aimUp) toolMask |= 1 << i;
+        // A layout saved before the field existed has it false everywhere: fall
+        // back to the default's choice, which is the Tool key.
+        if (toolMask == 0)
+        {
+            var fresh = PadLayoutFile.Defaults();
+            for (int i = 0; i < ButtonCount; i++)
+                if (fresh.keys[i].aimUp) toolMask |= 1 << i;
+        }
         invExitContent = new GUIContent("Exit");
         invLeftContent = new GUIContent("<");
         invRightContent = new GUIContent(">");
@@ -805,6 +813,13 @@ public class PadKeySpec
     public string shape = "circle";   // circle | pill
     public float scale = 1f;          // 0.5 .. 2
     public string label;
+
+    /**
+     * Supplies "up" while this key is held, for controls the game only accepts
+     * with an aim direction (Skill / Tool throws a tool only that way). False
+     * everywhere else: the same control without it casts the Silk Skill.
+     */
+    public bool aimUp;
 }
 
 [Serializable]
@@ -935,22 +950,30 @@ public class PadLayoutFile
             label = label,
         };
 
-        var keys = new PadKeySpec[OnScreenDevice.ButtonCount];
-        keys[OnScreenDevice.Jump] = Key(OnScreenDevice.Jump, "Action1",
+        /** A key that supplies "up" while held: a tool throw needs an aim. */
+        PadKeySpec ToolKey(int slot, string target, float x, float y, float w, float h,
+            string shape, string label)
+        {
+            var spec = Key(slot, target, x, y, w, h, shape, label);
+            spec.aimUp = true;
+            return spec;
+        }
+
+        var keys = new PadKeySpec[OnScreenDevice.ButtonCount];        keys[OnScreenDevice.Jump] = Key(OnScreenDevice.Jump, "Action1",
             clusterX, clusterY + off / hf, face, face, "circle", "Jump");
-        keys[OnScreenDevice.Cast] = Key(OnScreenDevice.Cast, "Action2",
-            0.906f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Cast");
+        keys[OnScreenDevice.Cast] = Key(OnScreenDevice.Cast, "RightBumper",
+            0.906f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Skill");
         keys[OnScreenDevice.Attack] = Key(OnScreenDevice.Attack, "Action3",
             clusterX - off / wf, clusterY, face, face, "circle", "Attack");
         keys[OnScreenDevice.Heal] = Key(OnScreenDevice.Heal, "Action2",
-            clusterX + off / wf, clusterY, face, face, "circle", "Heal");
+            clusterX + off / wf, clusterY, face, face, "circle", "Bind");
         keys[OnScreenDevice.Dash] = Key(OnScreenDevice.Dash, "RightTrigger",
             clusterX, clusterY - off / hf, face, face, "circle", "Dash");
         keys[OnScreenDevice.Map] = Key(OnScreenDevice.Map, "LeftBumper",
             0.100f, 0.26f, 0.130f * wf, 0.075f * hf, "pill", "Map");
         keys[OnScreenDevice.Inventory] = Key(OnScreenDevice.Inventory, "Select",
             0.100f, 0.18f, 0.130f * wf, 0.075f * hf, "pill", "Inventory");
-        keys[OnScreenDevice.Throw] = Key(OnScreenDevice.Throw, "RightBumper",
+        keys[OnScreenDevice.Throw] = ToolKey(OnScreenDevice.Throw, "RightBumper",
             0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Tool");
         keys[OnScreenDevice.Pause] = Key(OnScreenDevice.Pause, "Start",
             0.940f, 0.10f, 0.055f * wf, 0.075f * hf, "pill", "II");

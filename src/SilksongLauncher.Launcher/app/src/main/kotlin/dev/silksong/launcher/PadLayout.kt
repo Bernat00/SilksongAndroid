@@ -34,6 +34,8 @@ class PadLayout(
         var shape: String = "circle",
         var scale: Float = 1f,
         var label: String = "",
+        /** Supplies "up" while held: the game only throws a tool while aiming. */
+        var aimUp: Boolean = false,
     )
 
     data class Stick(
@@ -75,6 +77,7 @@ class PadLayout(
                 put("shape", k.shape)
                 put("scale", k.scale.toDouble())
                 put("label", k.label)
+                put("aimUp", k.aimUp)
             })
         })
     }.toString(2)
@@ -94,13 +97,13 @@ class PadLayout(
          */
         val TARGETS = listOf(
             "Action1" to "Jump",
-            "Action2" to "Cast / Heal",
+            "Action2" to "Bind / Heal",
             "Action3" to "Attack",
             "Action4" to "Dream Nail",
             "LeftTrigger" to "Super Dash",
-            "RightTrigger" to "Dash",
+            "RightTrigger" to "Dash / Sprint",
             "LeftBumper" to "Map",
-            "RightBumper" to "Quick Cast",
+            "RightBumper" to "Skill / Tool",
             "Select" to "Inventory",
             "Start" to "Pause",
             "RightStickButton" to "Taunt",
@@ -160,6 +163,7 @@ class PadLayout(
                     shape = k.optString("shape", "circle"),
                     scale = k.optDouble("scale", 1.0).toFloat(),
                     label = k.optString("label", ""),
+                    aimUp = k.optBoolean("aimUp", false),
                 )
             }
             val s = o.optJSONObject("stick")
@@ -191,19 +195,19 @@ class PadLayout(
             val off = 0.155f
             val face = 0.16f
             fun key(id: String, target: String, x: Float, y: Float, w: Float, h: Float,
-                    shape: String, label: String) =
-                Key(id, target, x, y, w, h, shape, 1f, label)
+                    shape: String, label: String, aimUp: Boolean = false) =
+                Key(id, target, x, y, w, h, shape, 1f, label, aimUp)
 
             return PadLayout(
                 mutableListOf(
                     key("jump", "Action1", 0.845f, 0.60f + off / hf, face, face, "circle", "Jump"),
-                    key("cast", "Action2", 0.906f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Cast"),
+                    key("cast", "RightBumper", 0.906f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Skill"),
                     key("attack", "Action3", 0.845f - off / wf, 0.60f, face, face, "circle", "Attack"),
-                    key("heal", "Action2", 0.845f + off / wf, 0.60f, face, face, "circle", "Heal"),
+                    key("heal", "Action2", 0.845f + off / wf, 0.60f, face, face, "circle", "Bind"),
                     key("dash", "RightTrigger", 0.845f, 0.60f - off / hf, face, face, "circle", "Dash"),
                     key("map", "LeftBumper", 0.100f, 0.26f, 0.130f * wf, 0.075f * hf, "pill", "Map"),
                     key("inventory", "Select", 0.100f, 0.18f, 0.130f * wf, 0.075f * hf, "pill", "Inventory"),
-                    key("throw", "RightBumper", 0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Tool"),
+                    key("throw", "RightBumper", 0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Tool", aimUp = true),
                     key("pause", "Start", 0.940f, 0.10f, 0.055f * wf, 0.075f * hf, "pill", "II"),
                 ),
                 Stick(),
