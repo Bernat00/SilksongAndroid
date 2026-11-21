@@ -71,11 +71,19 @@ discrepancy (upstream issue #47 work) that motivated this file.
 
 ## On-screen pad and game action mappings (verified 2026-11-19)
 
-- The game's controller mapping: `Action1` Jump, `Action2` Cast/Heal (tap casts
-  the Silk Skill, hold heals/binds), `Action3` Attack, `Action4` Dream
-  Nail/Needolin (only reacts to valid targets), `RightTrigger` Dash,
-  `LeftBumper` Map, `Select` Inventory, `RightBumper` QuickCast (tools/needles;
-  aims with the stick), `Start` Pause.
+- The game's controller mapping, read off the in-game **Controller** screen
+  (screenshot 2026-11-21, `Options → Controller`): `LeftTrigger` Inventory,
+  `LeftBumper` Quick Map, `RightTrigger` **Sprint**, `RightBumper` **Skill /
+  Tool** (one control: the silk skill and the equipped tool share it), and the
+  face buttons Bind / Jump / Attack / Needolin. `Action1` Jump, `Action2`
+  Cast/Heal (tap casts the Silk Skill, hold heals/binds), `Action3` Attack,
+  `Action4` Dream Nail/Needolin (only reacts to valid targets), `Select`
+  Inventory, `Start` Pause.
+- So `RightBumper` is *not* a separate "throw tools" control: pressing it uses
+  the Skill, and a tool is thrown from the same button when one is equipped.
+  The pad's pill is labelled **Tool** for that reason — a "Throw" label
+  promised something the control cannot do on its own, and cost a device test
+  to discover.
 - `OnScreenDevice` creates every control it uses explicitly. `InputDevice.OnAttached`
   adds only alias controls (stick axes, DPad, Command, style commands); any
   `UpdateWithState` on a control that was not added is a silent no-op.

@@ -204,7 +204,7 @@ public class VirtualPad : MonoBehaviour
     static readonly string[] FallbackLabels =
     {
         "Jump", "Cast", "Attack", "Heal", "Dash",
-        "Map", "Inventory", "Throw", "II",
+        "Map", "Inventory", "Tool", "II",
     };
 
     static bool Verbose;
@@ -579,7 +579,7 @@ public class VirtualPad : MonoBehaviour
         LabelFor(actions.Jump, "Jump");
         LabelFor(actions.Cast, "Cast");
         LabelFor(actions.Attack, "Attack");
-        LabelFor(actions.QuickCast, "Throw");
+        LabelFor(actions.QuickCast, "Tool");
         LabelFor(actions.QuickMap, "Map");
         LabelFor(actions.OpenInventory, "Inventory");
     }
@@ -930,7 +930,7 @@ public class PadLayoutFile
         keys[OnScreenDevice.Inventory] = Key(OnScreenDevice.Inventory, "Select",
             0.100f, 0.18f, 0.130f * wf, 0.075f * hf, "pill", "Inventory");
         keys[OnScreenDevice.Throw] = Key(OnScreenDevice.Throw, "RightBumper",
-            0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Throw");
+            0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Tool");
         keys[OnScreenDevice.Pause] = Key(OnScreenDevice.Pause, "Start",
             0.940f, 0.10f, 0.055f * wf, 0.075f * hf, "pill", "II");
 

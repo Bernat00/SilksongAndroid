@@ -203,7 +203,7 @@ class PadLayout(
                     key("dash", "RightTrigger", 0.845f, 0.60f - off / hf, face, face, "circle", "Dash"),
                     key("map", "LeftBumper", 0.100f, 0.26f, 0.130f * wf, 0.075f * hf, "pill", "Map"),
                     key("inventory", "Select", 0.100f, 0.18f, 0.130f * wf, 0.075f * hf, "pill", "Inventory"),
-                    key("throw", "RightBumper", 0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Throw"),
+                    key("throw", "RightBumper", 0.784f, 0.27f, 0.110f * wf, 0.090f * hf, "pill", "Tool"),
                     key("pause", "Start", 0.940f, 0.10f, 0.055f * wf, 0.075f * hf, "pill", "II"),
                 ),
                 Stick(),

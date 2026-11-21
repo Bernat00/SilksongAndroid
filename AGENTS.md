@@ -212,10 +212,11 @@ the build" is heavy and usually unnecessary.
   binds; `InputManager` owns `Commit` and `ActiveDevice` arbitrates between the
   pad, a physical controller and the keyboard. No `PlayerActionSet.Device` pin,
   `IncludeDevices` or binding hammer.
-- Controls: `Action1` Jump, `Action2` Cast **and** Heal, `Action3` Attack,
-  `RightTrigger` Dash, `LeftBumper` Map, `Select` Inventory, `RightBumper`
-  Throw/QuickCast, `Start` Pause. No `Action4` — Dream Nail/Needolin is not on
-  the pad.
+- Controls: `Action1` Jump, `Action2` Cast **and** Heal (the game calls it
+  *Bind*), `Action3` Attack, `RightTrigger` Dash (in-game *Sprint*),
+  `LeftBumper` Map, `Select` Inventory, `RightBumper` Skill / Tool — one control
+  that both casts the silk skill and throws an equipped tool, `Start` Pause. No
+  `Action4` — Dream Nail/Needolin is not on the pad.
 - Cast and Heal are one game action (tap casts the Silk Skill, hold heals), and
   both buttons OR into `Action2`.
 - Modes: Hidden / Play / Inventory. Inventory follows
