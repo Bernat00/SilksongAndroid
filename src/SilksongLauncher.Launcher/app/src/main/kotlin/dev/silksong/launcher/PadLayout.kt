@@ -109,6 +109,21 @@ class PadLayout(
 
         fun file(context: Context): File = File(context.getExternalFilesDir(null), FILE)
 
+        // Slot order, mirroring OnScreenDevice: the game's array is indexed the
+        // same way and the JSON is written in that order.
+        const val SLOT_JUMP = 0
+        const val SLOT_CAST = 1
+        const val SLOT_ATTACK = 2
+        const val SLOT_HEAL = 3
+        const val SLOT_DASH = 4
+        const val SLOT_MAP = 5
+        const val SLOT_INVENTORY = 6
+        const val SLOT_THROW = 7
+        const val SLOT_PAUSE = 8
+
+        /** The four face keys: the diamond, as one shape. */
+        val DIAMOND = intArrayOf(SLOT_JUMP, SLOT_ATTACK, SLOT_HEAL, SLOT_DASH)
+
         fun load(context: Context, width: Int, height: Int): PadLayout {
             val f = file(context)
             if (!f.isFile) return defaults(width, height)

@@ -770,6 +770,13 @@ class LauncherActivity : Activity() {
         runCatching { DepotLocation.relink(this, depot) }
             .onFailure { LauncherLog.log("could not relink the content", it) }
 
+        // Before the engine owns the save directory: a copy beside the depot,
+        // outside the app's own storage, so an uninstall cannot take it. See
+        // SaveBackup -- one hour of play has already been lost that way.
+        kotlin.concurrent.thread(name = "save-backup") {
+            SaveBackup.backup(this, depot)
+        }
+
         // The game's process has to be able to load its own activity, and
         // GameActivity's superclass comes from a dex this app builds on the
         // device rather than from anything in the APK. When that dex is not

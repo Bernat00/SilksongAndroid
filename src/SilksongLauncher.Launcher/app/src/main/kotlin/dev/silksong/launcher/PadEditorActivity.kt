@@ -100,6 +100,7 @@ class PadEditorActivity : Activity() {
         pinButton = button("Stick: floating") { togglePin() }
         row.addView(pinButton, weight())
         row.addView(button("Reset") { reset() }, weight())
+        row.addView(button("Diamond") { canvas.selectDiamond() }, weight())
         row.addView(button("Cancel") { finish() }, weight())
         row.addView(button("Save") { save() }, weight())
         row.addView(button("Hide") { setChromeVisible(false) }, weight())
@@ -204,10 +205,16 @@ class PadEditorActivity : Activity() {
         private var selectedKey = -1
         private var selectedStick = false
         private var selectedZone = false
+        private var selectedGroup = false
         private var scaling = false
         private var dragCorner = -1
         private var startDistance = 0f
         private var startValue = 0f
+        private var groupX: FloatArray? = null
+        private var groupY: FloatArray? = null
+        private var groupS: FloatArray? = null
+        private var groupCx = 0f
+        private var groupCy = 0f
         private var lastX = 0f
         private var lastY = 0f
 
@@ -238,7 +245,25 @@ class PadEditorActivity : Activity() {
             selectedKey = -1
             selectedStick = false
             selectedZone = false
+            selectedGroup = false
         }
+
+        /**
+         * The four face keys, selected together.
+         *
+         * Their size and their spread are one shape: growing the circles
+         * without moving them apart welds them into a blob, so a group scale
+         * moves the centres out from the group's own centroid as it scales the
+         * buttons.
+         */
+        fun selectDiamond() {
+            deselect()
+            selectedGroup = true
+            status.text = "Diamond: drag to move the four, pinch to resize all of them"
+            invalidate()
+        }
+
+        private val groupSlots = PadLayout.DIAMOND
 
         private fun vmin() = minOf(width, height).toFloat().coerceAtLeast(1f)
 
@@ -309,6 +334,23 @@ class PadEditorActivity : Activity() {
                 }
                 g.drawText(k.label, r.centerX(), r.centerY() + text.textSize / 3f, text)
             }
+
+            if (selectedGroup) {
+                var left = Float.MAX_VALUE
+                var top = Float.MAX_VALUE
+                var right = -Float.MAX_VALUE
+                var bottom = -Float.MAX_VALUE
+                for (slot in groupSlots) {
+                    val r = keyRect(layout.keys[slot])
+                    left = minOf(left, r.left)
+                    top = minOf(top, r.top)
+                    right = maxOf(right, r.right)
+                    bottom = maxOf(bottom, r.bottom)
+                }
+                val pad = 6f * resources.displayMetrics.density
+                stroke.color = Color.WHITE
+                g.drawRect(left - pad, top - pad, right + pad, bottom + pad, stroke)
+            }
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -336,6 +378,16 @@ class PadEditorActivity : Activity() {
             lastX = x
             lastY = y
             scaling = false
+            // Group mode stays on while its own keys are being dragged; only a
+            // touch somewhere else leaves it.
+            if (selectedGroup) {
+                for (slot in groupSlots) {
+                    if (keyRect(layout.keys[slot]).contains(x, y)) {
+                        status.text = "Diamond: drag to move the four, pinch to resize all of them"
+                        return
+                    }
+                }
+            }
             // Keys first, then the ring, then the zone: the drawing order
             // bottom-up, so the thing on top is the thing picked.
             for (index in layout.keys.indices.reversed()) {
@@ -384,7 +436,13 @@ class PadEditorActivity : Activity() {
             val dy = (y - lastY) / height
             lastX = x
             lastY = y
-            if (selectedKey >= 0) {
+            if (selectedGroup) {
+                for (slot in groupSlots) {
+                    val k = layout.keys[slot]
+                    k.x = (k.x + dx).coerceIn(0.02f, 0.98f)
+                    k.y = (k.y + dy).coerceIn(0.02f, 0.98f)
+                }
+            } else if (selectedKey >= 0) {
                 val k = layout.keys[selectedKey]
                 k.x = (k.x + dx).coerceIn(0.02f, 0.98f)
                 k.y = (k.y + dy).coerceIn(0.02f, 0.98f)
@@ -433,16 +491,39 @@ class PadEditorActivity : Activity() {
             scaling = true
             startDistance = distance(event)
             startValue = when {
+                selectedGroup -> 1f
                 selectedKey >= 0 -> layout.keys[selectedKey].scale
                 selectedStick -> layout.stick.r
                 selectedZone -> layout.stick.x1 - layout.stick.x0
                 else -> 0f
+            }
+            if (selectedGroup) {
+                groupCx = groupSlots.map { layout.keys[it].x }.average().toFloat()
+                groupCy = groupSlots.map { layout.keys[it].y }.average().toFloat()
+                groupX = FloatArray(groupSlots.size) { layout.keys[groupSlots[it]].x }
+                groupY = FloatArray(groupSlots.size) { layout.keys[groupSlots[it]].y }
+                groupS = FloatArray(groupSlots.size) { layout.keys[groupSlots[it]].scale }
             }
         }
 
         private fun applyScale(event: MotionEvent) {
             if (startDistance <= 0f || startValue <= 0f) return
             val factor = (distance(event) / startDistance).coerceIn(0.5f, 2f)
+            if (selectedGroup) {
+                // Size and spread scale together, from the group's centroid:
+                // four circles that grow without moving apart are one blob.
+                val gx = groupX ?: return
+                val gy = groupY ?: return
+                val gs = groupS ?: return
+                for ((index, slot) in groupSlots.withIndex()) {
+                    val k = layout.keys[slot]
+                    k.x = (groupCx + (gx[index] - groupCx) * factor).coerceIn(0.02f, 0.98f)
+                    k.y = (groupCy + (gy[index] - groupCy) * factor).coerceIn(0.02f, 0.98f)
+                    k.scale = (gs[index] * factor).coerceIn(0.5f, 2f)
+                }
+                invalidate()
+                return
+            }
             when {
                 selectedKey >= 0 -> layout.keys[selectedKey].scale = (startValue * factor).coerceIn(0.5f, 2f)
                 selectedStick -> layout.stick.r = (startValue * factor).coerceIn(0.05f, 0.30f)
