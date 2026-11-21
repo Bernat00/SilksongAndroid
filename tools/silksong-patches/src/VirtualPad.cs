@@ -222,6 +222,12 @@ public class VirtualPad : MonoBehaviour
     int stickFinger = -1;
     Vector2 stickOrigin;               // GUI pixels
     Vector2 stickKnob;                 // -1..1, InControl convention (Y up)
+
+    /** Bits for the slots bound to Skill / Tool; pressing one aims up. */
+    int toolMask;
+
+    /** Below this stick magnitude the Tool press supplies the direction. */
+    const float AimAssist = 0.35f;
     readonly int[] buttonFinger = new int[ButtonCount];
 
     readonly string[] labels = new string[ButtonCount];
@@ -259,6 +265,11 @@ public class VirtualPad : MonoBehaviour
             labelContent[i] = new GUIContent(labels[i]);
         }
         device = new OnScreenDevice(targets, names);
+        // Which slots are the game's "Skill / Tool" control: pressing one of
+        // them aims up for you (see RoutePlayTouches).
+        toolMask = 0;
+        for (int i = 0; i < ButtonCount; i++)
+            if (targets[i] == InputControlType.RightBumper) toolMask |= 1 << i;
         invExitContent = new GUIContent("Exit");
         invLeftContent = new GUIContent("<");
         invRightContent = new GUIContent(">");
@@ -443,6 +454,16 @@ public class VirtualPad : MonoBehaviour
         if (stickFinger != -1)
         {
             stick = Vector2.ClampMagnitude(stickKnob, 1f);
+            anyInput = true;
+        }
+        // The game throws a tool only while the stick is up -- on a controller
+        // that is a flick of the thumb, on a touchscreen it costs a second
+        // finger and a steady hold. So pressing Tool alone aims up for you.
+        // A direction the player is already giving is left alone: aiming a tool
+        // down (or throwing while running) has to keep working.
+        if (toolMask != 0 && (mask & toolMask) != 0 && stick.sqrMagnitude < AimAssist * AimAssist)
+        {
+            stick = Vector2.up;
             anyInput = true;
         }
         device.SetInput(stick, mask);
