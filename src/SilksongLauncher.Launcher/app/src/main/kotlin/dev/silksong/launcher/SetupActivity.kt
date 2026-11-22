@@ -489,9 +489,11 @@ class SetupActivity : Activity() {
         block.addView(text(
             buildString {
                 append(
-                    "Below about 3.4 GB free, Android usually stops the conversion " +
-                        "part-way and it starts again from the first file; restarting " +
-                        "the phone frees the most.",
+                    "A conversion dies only if the memory killer takes it mid-run, and " +
+                        "a faster run is exposed for less time -- which is why the " +
+                        "largest tier often wins even though it holds the most. " +
+                        "What hurts is other apps competing: close them, or restart " +
+                        "the phone first.",
                 )
                 if (chipsAllowed) append(" Chips are cores · MB.")
             },

@@ -75,10 +75,15 @@ the repo; without it only adb-side work is possible.
 The S23+ (SM-S916B, 7.24 GB total) loses most conversions to Android's
 low-memory killer, not to an allocation failure:
 
-- In `launcher.log` (11-13 → 11-19: 30 starts, 15 mid-run reclaims, 9 installs)
-  every attempt that began with **≥3.2 GB `MemAvailable`** finished, and every
-  one at **≤2.9 GB** was killed around file 900 of 1162 — where the big
-  translation units are.
+- What kills a run is **time spent near the memory threshold**, not the peak.
+  A pressure event during the window takes the process, so a faster run has a
+  shorter window: on 11-22 the *largest* tier (8 cores/2560 MB) finished all
+  1162 files in 8.5 min from a 2.4 GB start, while 3 cores/896 MB was
+  reclaimed at 926 files after 10.5 min on the same phone in the same hour.
+  The old "≥3.2 GB free finished, ≤2.9 GB died" rule held only because it
+  correlated with how much *other* software was competing. Free memory still
+  matters — below ~2.5 GB a large run may not start at all — but choosing the
+  biggest tier when the phone is otherwise quiet is now the default.
 - The kill is lmkd's SIGKILL, reported by `ActivityManager` as
   `REASON_LOW_MEMORY` (sometimes `REASON_EXCESSIVE_RESOURCE_USAGE`);
   `convert.log` stays 0 bytes and `err.log` holds only clang warnings. An
@@ -90,8 +95,10 @@ low-memory killer, not to an allocation failure:
 
 `MonoRuntime.budget()` tiers from **total** RAM: ≥6.6 GB → 2560 MB heap,
 ≥5.2 → 4 cores/1024 MB, ≥3.2 → 2/640, else 1/`FLOOR_HEAP_MB` (384).
-`il2cppBudget()` overrides `SM-S916*` to **6 cores/1792 MB** because the 2560 MB
-tier reliably reaches ~99% and is reclaimed there. Reclaimed runs retry through
+`il2cppBudget()` still caps `SM-S916*` at **6 cores/1792 MB** by default — the
+2560 MB tier has been seen to reach ~99% and be reclaimed — although the same
+phone finished on 8/2560 in 8.5 min once the cached apps had been evicted, so
+that cap is a default and not a law; an explicit chip ignores it. Reclaimed runs retry through
 `tighter()`, which halves heap and cores. Because the tier comes from total RAM,
 a phone with 2 GB actually free still starts at the large tier — the single
 biggest source of wasted attempts. `android:largeHeap="true"` (written by
@@ -109,7 +116,8 @@ in `launcher_settings`. `Auto` is the free-RAM tier capped by the total-RAM tier
 and by the S23+ 1792 MB limit, so a smaller phone can never be handed more than
 it used to get; an explicit choice is honoured, clamped to real cores, and the
 chosen rule is logged. The same screen shows live `MemAvailable` once a second
-while it is resumed, red under 3.4 GB. A built game whose staged-asset digest no
+while it is resumed, red under 2.5 GB (the point below which Auto stops
+offering the largest tier). A built game whose staged-asset digest no
 longer matches shows as **"The patches are newer than the game"** (Rebuild /
 Play anyway) rather than as a device with no game on it.
 

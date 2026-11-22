@@ -64,13 +64,26 @@ import java.util.concurrent.atomic.AtomicInteger
  * Free memory, in MB, at which each conversion tier has been observed to work.
  *
  * Not total RAM: the same 8 GB phone can have 2 or 4 GB free depending on what
- * the user left open, and that difference decided every run in the logs.
+ * the user left open.
+ *
+ * These used to be 3400 / 2600 / 1800, on the theory that a run only survives
+ * if it starts comfortable. The log says otherwise: what kills a conversion is
+ * *time spent near the threshold*, not the peak -- a pressure event during the
+ * window is what takes the process, and a faster run has a shorter window. On
+ * 2026-11-22 the largest tier (8 cores / 2560 MB) finished all 1162 files in
+ * 8.5 minutes at a 2.4 GB start, while 3 cores / 896 MB was reclaimed at 926
+ * files after 10.5 minutes on the same phone, in the same hour.
+ *
+ * So the top tier is offered as soon as the phone can plausibly hold it, and
+ * the ladder only steps down when memory is genuinely short. An explicit chip
+ * choice still wins over all of this.
+ *
  * Top-level rather than inside [MonoRuntime] so the nested [MonoRuntime.Memory]
  * can read them without the object's private accessors.
  */
-private const val COMFORTABLE_MB = 3400L
-private const val TIGHT_MB = 2600L
-private const val DESPERATE_MB = 1800L
+private const val COMFORTABLE_MB = 2500L
+private const val TIGHT_MB = 1900L
+private const val DESPERATE_MB = 1400L
 
 /** The smallest tier offered, and the one the retry ladder bottoms out above. */
 private const val SMALLEST_TIER_MB = 448
