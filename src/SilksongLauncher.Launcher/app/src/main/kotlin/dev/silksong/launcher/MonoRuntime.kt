@@ -314,23 +314,29 @@ object MonoRuntime {
     fun il2cppBudget(context: Context): Budget {
         val automatic = autoBudget(context)
         val store = SettingsStore(context)
-        // A run that was reclaimed must not be followed by one at the same
-        // size or larger: the pressure that killed it has already been proven
-        // on this device. This is persisted because the launcher can die in
-        // the same sweep the builder dies in, which is exactly when the ladder
-        // used to be forgotten (2026-11-22: reclaimed at 3/896, retried at
-        // 1/448, launcher killed, next attempt went back up to 8/2560).
-        val reclaimed = parseBudget(store.il2cppReclaimed)
-        if (reclaimed != null) {
-            val lower = reclaimed.tighter()
-            if (lower != null) {
-                LauncherLog.log(
-                    "il2cpp: last run reclaimed at $reclaimed; starting at $lower, ${memory(context)}",
-                )
-                return lower
+        val chosen = store.il2cppBudget
+        // A run that was reclaimed should not be followed by one at the same
+        // size -- but only when the size was the device's choice. An explicit
+        // tier is the user's call and stays theirs: on 2026-11-22 the 8/2560
+        // tier finished in 8.5 minutes after the 3/896 one died at 926 files,
+        // so "start smaller" is not obviously right and is not ours to decide.
+        //
+        // This is persisted because the launcher can die in the same sweep the
+        // builder dies in, which is exactly when the ladder used to be
+        // forgotten (reclaimed at 3/896, retried at 1/448, launcher killed,
+        // next attempt went back up to the stored tier).
+        if (chosen == BUDGET_AUTO) {
+            val reclaimed = parseBudget(store.il2cppReclaimed)
+            if (reclaimed != null) {
+                val lower = reclaimed.tighter()
+                if (lower != null) {
+                    LauncherLog.log(
+                        "il2cpp: last run reclaimed at $reclaimed; starting at $lower, ${memory(context)}",
+                    )
+                    return lower
+                }
             }
         }
-        val chosen = store.il2cppBudget
         if (chosen == BUDGET_AUTO) {
             LauncherLog.log("il2cpp: automatic $automatic, ${memory(context)}")
             return automatic
