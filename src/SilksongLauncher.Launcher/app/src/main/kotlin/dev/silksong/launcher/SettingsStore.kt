@@ -184,6 +184,22 @@ class SettingsStore(context: Context) {
      * value a later version cannot parse has to fall back to automatic rather
      * than fail to load the screen it is read on.
      */
+    /**
+     * The tier whose run was last reclaimed by the memory killer, as "cores:heap".
+     *
+     * Kept on disk rather than in memory because the launcher process dies too:
+     * on 2026-11-22 the conversion was reclaimed at 926 files, the retry
+     * correctly dropped to 1 core, and then the *launcher* was killed as well --
+     * so the ladder died with it and the next attempt restarted at the stored
+     * 8 cores/2560 MB, the tier that had just failed. Clearing it on success is
+     * what stops that from outliving the pressure it describes.
+     */
+    var il2cppReclaimed: String
+        get() = prefs.getString(KEY_IL2CPP_RECLAIMED, "") ?: ""
+        set(value) {
+            prefs.edit().putString(KEY_IL2CPP_RECLAIMED, value).apply()
+        }
+
     var il2cppBudget: String
         get() = prefs.getString(KEY_IL2CPP_BUDGET, BUDGET_AUTO) ?: BUDGET_AUTO
         set(value) {
@@ -251,5 +267,6 @@ class SettingsStore(context: Context) {
         const val KEY_GOG_AUTO_PULL = "gog_auto_pull"
         const val KEY_GOG_AUTO_PUSH = "gog_auto_push"
         const val KEY_IL2CPP_BUDGET = "il2cpp_budget"
+        const val KEY_IL2CPP_RECLAIMED = "il2cpp_reclaimed"
     }
 }

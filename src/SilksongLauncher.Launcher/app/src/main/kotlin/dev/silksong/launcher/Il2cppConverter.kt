@@ -464,6 +464,10 @@ object Il2cppConverter {
             // is a conversion that will throw again, and retrying it costs the
             // user another six minutes to reach the same message.
             while (first.outOfMemory) {
+                // Written before the next attempt so that a launcher death in
+                // the same sweep still leaves the evidence behind (see
+                // SettingsStore.il2cppReclaimed).
+                SettingsStore(context).il2cppReclaimed = budget.label()
                 val next = budget.tighter() ?: break
                 budget = next
                 MonoRuntime.runningBudget = budget
@@ -477,8 +481,7 @@ object Il2cppConverter {
         }
         val seconds = (System.currentTimeMillis() - started) / 1000
 
-        if (!result.ok) {
-            if (result.outOfMemory) {
+        if (!result.ok) {            if (result.outOfMemory) {
                 throw IOException(
                     "il2cpp ran out of memory after ${seconds}s, at the smallest settings " +
                         "there are ($budget). Close other apps, or restart the device, and " +
@@ -491,6 +494,9 @@ object Il2cppConverter {
                 ?: lastWords(log)
             throw IOException("il2cpp failed after ${seconds}s, exit ${result.code}: $why")
         }
+        // The tier held, so the evidence of past pressure is no longer a reason
+        // to start the next build small.
+        SettingsStore(context).il2cppReclaimed = ""
         if (metadata(root).length() <= 0) {
             throw IOException("il2cpp produced no global-metadata.dat")
         }

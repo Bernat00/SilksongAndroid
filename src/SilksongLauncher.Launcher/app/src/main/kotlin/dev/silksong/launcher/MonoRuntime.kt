@@ -313,7 +313,24 @@ object MonoRuntime {
      */
     fun il2cppBudget(context: Context): Budget {
         val automatic = autoBudget(context)
-        val chosen = SettingsStore(context).il2cppBudget
+        val store = SettingsStore(context)
+        // A run that was reclaimed must not be followed by one at the same
+        // size or larger: the pressure that killed it has already been proven
+        // on this device. This is persisted because the launcher can die in
+        // the same sweep the builder dies in, which is exactly when the ladder
+        // used to be forgotten (2026-11-22: reclaimed at 3/896, retried at
+        // 1/448, launcher killed, next attempt went back up to 8/2560).
+        val reclaimed = parseBudget(store.il2cppReclaimed)
+        if (reclaimed != null) {
+            val lower = reclaimed.tighter()
+            if (lower != null) {
+                LauncherLog.log(
+                    "il2cpp: last run reclaimed at $reclaimed; starting at $lower, ${memory(context)}",
+                )
+                return lower
+            }
+        }
+        val chosen = store.il2cppBudget
         if (chosen == BUDGET_AUTO) {
             LauncherLog.log("il2cpp: automatic $automatic, ${memory(context)}")
             return automatic
@@ -1218,8 +1235,29 @@ object MonoRuntime {
         val mi = ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)
         val pressure = if (mi.lowMemory) ", and the device is short of memory" else ""
-        "${gb(mi.availMem)} of ${gb(mi.totalMem)} free$pressure${battery(context)}"
+        "${gb(mi.availMem)} of ${gb(mi.totalMem)} free$pressure${swap()}${battery(context)}"
     }.getOrDefault("free memory unknown")
+
+    /**
+     * How much of the device's compressed swap is in use.
+     *
+     * The number that separates "this tool is hungry" from "this tool is
+     * leaking": RSS grows with the work either way, but a leak pushes pages
+     * into zram and keeps them there. Cheap, and it rides the line already
+     * being written every thirty seconds.
+     */
+    private fun swap(): String = runCatching {
+        var total = 0L
+        var free = 0L
+        java.io.File("/proc/meminfo").forEachLine { line ->
+            when {
+                line.startsWith("SwapTotal:") -> total = line.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                line.startsWith("SwapFree:") -> free = line.filter { it.isDigit() }.toLongOrNull() ?: 0L
+            }
+        }
+        val usedKb = (total - free).coerceAtLeast(0L)
+        if (total <= 0L || usedKb < 262144L) "" else ", ${gb(usedKb * 1024)} in zram"
+    }.getOrDefault("")
 
     /**
      * Temperature and whether it is on the charger, for the same line.
