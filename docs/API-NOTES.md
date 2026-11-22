@@ -94,8 +94,8 @@ discrepancy (upstream issue #47 work) that motivated this file.
 - The old failures (6-vs-8 arrays, missing controls, synthesized Android events,
   the `IncludeDevices`/`AddBinding` hammer) are recorded in
   `docs/SESSION-CHANGES.md`. Current layout: Dash top, Attack left, Jump bottom,
-  Heal right; Throw/Cast above the diamond; Map/Inventory text pills stacked
-  left; Pause top-right.
+  Bind right; Skill/Tool pills above the diamond; Map/Inventory text pills
+  stacked left; Pause top-right.
 - Player classes: `UnityDex` dexes the Unity player `classes.jar` on device and
   grafts it into the app class loader. `inject` validates that the jar contains
   `UnityPlayerForActivityOrService`; the repair probe uses a boot-parent
