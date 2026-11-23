@@ -162,6 +162,12 @@ class LauncherActivity : Activity() {
         // Settings + coming back doesn't trigger a push.
         if (returningFromGame) {
             returningFromGame = false
+            // The session's own progress is on disk now, and it is the copy
+            // worth having: the one taken before launch protects what you
+            // already had, this one protects what you just earned.
+            kotlin.concurrent.thread(name = "save-backup") {
+                SaveBackup.backup(this, DepotLocation.resolve(this))
+            }
             maybeAutoPush()
         }
     }
