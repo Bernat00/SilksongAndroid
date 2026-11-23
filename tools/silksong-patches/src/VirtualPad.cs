@@ -223,6 +223,9 @@ public class VirtualPad : MonoBehaviour
     Vector2 stickOrigin;               // GUI pixels
     Vector2 stickKnob;                 // -1..1, InControl convention (Y up)
 
+    /** Slots whose label came from pad-layout.json: the file wins over the game. */
+    bool[] labelFromFile;
+
     /** Bits for the slots bound to Skill / Tool; pressing one aims up. */
     int toolMask;
 
@@ -254,12 +257,14 @@ public class VirtualPad : MonoBehaviour
     void Start()
     {
         layout = PadLayoutFile.Load();
+        labelFromFile = new bool[ButtonCount];
         var names = new string[ButtonCount];
         for (int i = 0; i < ButtonCount; i++)
         {
             var spec = layout.keys[i];
             targets[i] = ParseTarget(spec != null ? spec.target : null, FallbackTargets[i]);
             var label = spec != null ? spec.label : null;
+            labelFromFile[i] = !string.IsNullOrEmpty(label);
             labels[i] = string.IsNullOrEmpty(label) ? FallbackLabels[i] : label;
             names[i] = labels[i];
             labelContent[i] = new GUIContent(labels[i]);
@@ -635,6 +640,13 @@ public class VirtualPad : MonoBehaviour
 
     void SetLabel(int slot, string text)
     {
+        // A label the layout file carries is the user's. RefreshLabels used to
+        // overwrite it from whatever the game had bound to the same control --
+        // and once Skill and Tool both target RightBumper, its SlotForControl
+        // picked the first of the two and renamed the Skill pill "Tool" at
+        // runtime. A file label is the source of truth; the game only names
+        // slots that have none.
+        if (labelFromFile != null && labelFromFile[slot]) return;
         if (labels[slot] == text) return;
         labels[slot] = text;
         labelContent[slot].text = text;
