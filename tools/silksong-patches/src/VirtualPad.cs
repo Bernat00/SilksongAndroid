@@ -226,6 +226,12 @@ public class VirtualPad : MonoBehaviour
     /** Slots whose label came from pad-layout.json: the file wins over the game. */
     bool[] labelFromFile;
 
+    /** True once every unnamed slot has been named, or the grace period ran out. */
+    bool labelsSettled;
+
+    /** Sweeps spent waiting for the game's action set; see FillUnnamedLabels. */
+    int labelTries;
+
     /** Bits for the slots bound to Skill / Tool; pressing one aims up. */
     int toolMask;
 
@@ -313,11 +319,14 @@ public class VirtualPad : MonoBehaviour
         else if (mode == PadMode.Inventory) RouteInventoryTouches();
         else device.SetInput(Vector2.zero, 0);
 
-        labelTimer -= Time.unscaledDeltaTime;
-        if (labelTimer <= 0f)
+        if (!labelsSettled)
         {
-            labelTimer = 0.5f;
-            RefreshLabels();
+            labelTimer -= Time.unscaledDeltaTime;
+            if (labelTimer <= 0f)
+            {
+                labelTimer = 0.5f;
+                FillUnnamedLabels();
+            }
         }
     }
 
@@ -601,10 +610,27 @@ public class VirtualPad : MonoBehaviour
 
     bool Hit(int slot, Vector2 guiPos) => ButtonRect(slot).Contains(guiPos);
 
-    // ── labels, read-only sweep ────────────────────────────────────────────
+    // ── labels ─────────────────────────────────────────────────────────────
 
-    void RefreshLabels()
+    /**
+     * Names the slots the layout file did not name, once the game can be asked.
+     *
+     * This used to run twice a second, forever, and to overwrite every slot it
+     * found bound to one of the game's actions. That was the only source of
+     * labels when the pad was constants; the moment pad-layout.json arrived it
+     * became a second writer fighting the first, and since Skill and Tool share
+     * RightBumper it renamed the Skill pill "Tool" every half second.
+     *
+     * So: the file wins, this only fills gaps, it runs until every gap is full
+     * (the action set is not ready at Start -- that is why it was a poll at
+     * all), and then stops. A player who rebinds controls in-game gets the
+     * game's names back only on slots the file left blank, which is the honest
+     * trade: a name the user chose outranks a name the engine inferred.
+     */
+    void FillUnnamedLabels()
     {
+        // An unnamed slot with no binding would poll for the whole session.
+        if (++labelTries > 30) { labelsSettled = true; return; }
         var gm = GameManager._instance;
         var handler = gm != null ? gm.inputHandler : null;
         var actions = handler != null ? handler.inputActions : null;
@@ -616,6 +642,10 @@ public class VirtualPad : MonoBehaviour
         LabelFor(actions.QuickCast, "Tool");
         LabelFor(actions.QuickMap, "Map");
         LabelFor(actions.OpenInventory, "Inventory");
+
+        for (int i = 0; i < ButtonCount; i++)
+            if (!labelFromFile[i] && labels[i] == FallbackLabels[i]) return;
+        labelsSettled = true;
     }
 
     void LabelFor(PlayerAction action, string label)
@@ -640,13 +670,8 @@ public class VirtualPad : MonoBehaviour
 
     void SetLabel(int slot, string text)
     {
-        // A label the layout file carries is the user's. RefreshLabels used to
-        // overwrite it from whatever the game had bound to the same control --
-        // and once Skill and Tool both target RightBumper, its SlotForControl
-        // picked the first of the two and renamed the Skill pill "Tool" at
-        // runtime. A file label is the source of truth; the game only names
-        // slots that have none.
-        if (labelFromFile != null && labelFromFile[slot]) return;
+        // Nothing the user configured is renamed, ever. See FillUnnamedLabels.
+        if (labelFromFile[slot]) return;
         if (labels[slot] == text) return;
         labels[slot] = text;
         labelContent[slot].text = text;
