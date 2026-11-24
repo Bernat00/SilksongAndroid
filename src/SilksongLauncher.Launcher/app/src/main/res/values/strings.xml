@@ -29,6 +29,8 @@
     <string name="settings_auto_pull_subtitle">Download newer cloud saves right before the game starts.</string>
     <string name="settings_auto_push">Upload cloud saves after playing</string>
     <string name="settings_auto_push_subtitle">Upload changed local saves when you return from the game.</string>
+    <string name="settings_restore_saves">Restore saves from backup</string>
+    <string name="settings_restore_saves_subtitle">Snapshots are taken before and after every session, beside the game files — not inside the app, so an uninstall cannot take them.</string>
     <string name="settings_perf_overlay">Show in-game perf overlay</string>
     <string name="settings_perf_overlay_subtitle">Top-right overlay with FPS, CPU and GPU load, RAM, and battery level and drain.</string>
 

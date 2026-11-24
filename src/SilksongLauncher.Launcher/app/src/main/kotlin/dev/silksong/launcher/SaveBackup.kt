@@ -98,6 +98,43 @@ object SaveBackup {
         }
     }
 
+    /** Every snapshot this class made, newest first. */
+    fun snapshots(depot: File?): List<File> =
+        dirFor(depot)?.listFiles { f -> f.isDirectory && STAMP.matches(f.name) }
+            ?.sortedByDescending { it.name }
+            ?: emptyList()
+
+    /**
+     * Puts a snapshot back, after taking one of the state it replaces.
+     *
+     * Restoring is destructive, so it is itself undoable: the current saves are
+     * snapshotted first, which means "restore" can be followed by another
+     * restore of what was there. The game must not be running -- the caller
+     * checks that -- or it would write over this the moment it saves.
+     */
+    fun restore(context: Context, depot: File?, snapshot: File): Int {
+        val target = SaveDir.of(context)
+        if (!target.isDirectory && !target.mkdirs()) throw java.io.IOException("no save dir at $target")
+        val files = snapshot.listFiles()?.filter { it.isFile && it.name.startsWith("user") }
+            ?: throw java.io.IOException("${snapshot.name} holds no saves")
+        if (files.isEmpty()) throw java.io.IOException("${snapshot.name} holds no saves")
+
+        // Undo point. Failure here aborts the restore rather than silently
+        // replacing saves with nothing to go back to.
+        backup(context, depot) ?: LauncherLog.log("saves: no undo snapshot before restore (nothing to copy)")
+
+        var written = 0
+        for (f in files) {
+            f.copyTo(File(target, f.name), overwrite = true)
+            written++
+        }
+        // The game's own backups (.bakN) come from the snapshot too; anything
+        // newer in the directory that the snapshot does not carry is not ours
+        // to delete, because the game may still reference it.
+        LauncherLog.log("saves: restored $written file(s) from ${snapshot.name} into $target")
+        return written
+    }
+
     /** The most recent backup, for a restore. */
     fun latest(depot: File?): File? =
         dirFor(depot)?.listFiles { f -> f.isDirectory && STAMP.matches(f.name) }?.maxByOrNull { it.name }

@@ -64,6 +64,29 @@
         android:layout_marginBottom="16dp"
         android:layout_marginStart="4dp" />
 
+    <Button
+        android:id="@+id/btn_restore_saves"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/settings_restore_saves"
+        android:textSize="15sp"
+        android:textColor="@color/text_on_control"
+        android:backgroundTint="@color/surface_control"
+        android:paddingStart="20dp"
+        android:paddingEnd="20dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:minHeight="0dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/settings_restore_saves_subtitle"
+        android:textColor="@color/text_dim"
+        android:textSize="12sp"
+        android:layout_marginBottom="16dp"
+        android:layout_marginStart="4dp" />
+
     <Switch
         android:id="@+id/sw_perf_log"
         android:layout_width="match_parent"

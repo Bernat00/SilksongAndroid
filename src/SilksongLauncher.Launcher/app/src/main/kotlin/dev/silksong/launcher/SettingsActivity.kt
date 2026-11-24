@@ -54,6 +54,8 @@ class SettingsActivity : Activity() {
         setContentView(R.layout.activity_settings)
         settings = SettingsStore(this)
 
+        val btnRestoreSaves: Button = findViewById(R.id.btn_restore_saves)
+        btnRestoreSaves.setOnClickListener { chooseSnapshot() }
         swAutoPull = findViewById(R.id.sw_auto_pull)
         swAutoPush = findViewById(R.id.sw_auto_push)
         swPerfOverlay = findViewById(R.id.sw_perf_overlay)
@@ -352,5 +354,74 @@ class SettingsActivity : Activity() {
             swGogPull.isChecked = false
             swGogPush.isChecked = false
         }
+    }
+
+    /**
+     * Pick a snapshot and put it back.
+     *
+     * A list rather than "restore the newest": the point of snapshots is that
+     * the one you want is the one from before the mistake, which is rarely the
+     * newest. The time shown is the one in the folder name, i.e. when the
+     * snapshot was taken.
+     */
+    private fun chooseSnapshot() {
+        val depot = DepotLocation.resolve(this)
+        val list = SaveBackup.snapshots(depot)
+        if (list.isEmpty()) {
+            alert("No backups yet", "A snapshot is taken every time the game starts or ends.")
+            return
+        }
+        val labels = list.map { snapshotLabel(it) }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Restore which save?")
+            .setItems(labels) { _, which -> confirmRestore(list[which]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun snapshotLabel(folder: java.io.File): String {
+        val text = try {
+            val parsed = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .parse(folder.name)
+            java.text.SimpleDateFormat("d MMM · HH:mm", java.util.Locale.US).format(parsed!!)
+        } catch (t: Throwable) {
+            folder.name
+        }
+        val count = folder.listFiles()?.count { it.isFile } ?: 0
+        return "$text   ·   $count file(s)"
+    }
+
+    private fun confirmRestore(folder: java.io.File) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Restore ${snapshotLabel(folder)}?")
+            .setMessage(
+                "The current saves are snapshotted first, so this can be undone by restoring " +
+                    "that new snapshot. The game must not be open.",
+            )
+            .setPositiveButton("Restore") { _, _ -> doRestore(folder) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doRestore(folder: java.io.File) {
+        val depot = DepotLocation.resolve(this)
+        kotlin.concurrent.thread(name = "restore-saves") {
+            val message = try {
+                val n = SaveBackup.restore(this, depot, folder)
+                "Restored $n file(s). Launch the game to see them."
+            } catch (t: Throwable) {
+                LauncherLog.log("saves: restore failed", t)
+                "Could not restore: ${t.message}"
+            }
+            runOnUiThread { alert("Restore", message) }
+        }
+    }
+
+    private fun alert(title: String, body: String) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(body)
+            .setPositiveButton("OK", null)
+            .show()
     }
 }
